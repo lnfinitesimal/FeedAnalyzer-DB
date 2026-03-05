@@ -66,9 +66,9 @@ class HTTPClient:
 
     def _delay(self, kind):
         if kind == "listing":
-            base = random.uniform(8, 12)
+            base = random.uniform(18, 24)
         else:
-            base = random.uniform(5, 7)
+            base = random.uniform(8,11)
         time.sleep(base * self.penalty_multiplier)
 
     def get(self, url, *, kind="page", attempts=3):
