@@ -83,7 +83,7 @@ class HTTPClient:
         self._next_rest = random.randint(30, 40)
 
     def get(self, url, *, kind="page"):
-        base = random.uniform(12, 16) if kind == "listing" else random.uniform(6, 10)
+        base = random.uniform(16, 20) if kind == "listing" else random.uniform(12, 14)
         time.sleep(base)
 
         if self.request_count > 0 and self.request_count >= self._next_rest:
