@@ -5,6 +5,9 @@ on:
     - cron: '0 2 * * 0'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   compile-intel:
     runs-on: ubuntu-latest
@@ -27,6 +30,13 @@ jobs:
         run: |
           git config --global user.name "Analyzer-Bot"
           git config --global user.email "bot@feedanalyzer.local"
-          git add feed_ratings.json ratings_statistics.md
-          git commit -m "Automated Intel DB update" || exit 0
-          git push
+          git add ratings.json statistics.md
+          
+          if git diff --staged --quiet; then
+            echo "No changes detected. Skipping commit."
+            exit 0
+          else
+            git commit -m "Automated Intel DB update"
+            git push
+            echo "Database successfully pushed to repository."
+          fi
