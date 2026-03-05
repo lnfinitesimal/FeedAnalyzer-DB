@@ -35,9 +35,7 @@ def normalize_data(value, is_country=False, is_bias=False):
     if not value: return None
     v = value.strip()
     v_upper = v.upper()
-    
-    if v_upper in ["", "UNKNOWN", "N/A", "NONE", "UNRATED"]:
-        return None
+    if v_upper in["", "UNKNOWN", "N/A", "NONE", "UNRATED"]: return None
         
     if is_country:
         def fix_country_word(w):
@@ -47,9 +45,7 @@ def normalize_data(value, is_country=False, is_bias=False):
             if w_up in["UK", "U.K.", "UNITED KINGDOM", "GREAT BRITAIN"]: return "UK"
             if w_up in["UAE", "EU"]: return w_up
             return w.title() if len(w) > 3 else w_up
-            
-        if ',' in v:
-            return ', '.join([fix_country_word(c) for c in v.split(',')])
+        if ',' in v: return ', '.join([fix_country_word(c) for c in v.split(',')])
         return fix_country_word(v)
         
     if is_bias:
@@ -57,30 +53,24 @@ def normalize_data(value, is_country=False, is_bias=False):
         if "PRO-SCIENCE" in v_upper or "SCIENCE" in v_upper: return "Pro-Science"
         if "CONSPIRACY" in v_upper or "PSEUDOSCIENCE" in v_upper: return "Conspiracy"
         if "QUESTIONABLE" in v_upper or "FAKE NEWS" in v_upper: return "Questionable"
-        
     return v.title()
 
 def analyze_article(article_url):
     try:
         res = session.get(article_url, headers=headers, timeout=15)
         if res.status_code != 200: return None
-            
         soup = BeautifulSoup(res.text, 'html.parser')
         source_link_tag = soup.find('a', string=re.compile('Source:', re.IGNORECASE))
         if not source_link_tag: return None
-            
         domain = get_root_domain(source_link_tag.get('href'))
         if not domain or len(domain) < 3: return None
             
-        clean_text = soup.get_text(separator=' ')
-        clean_text = re.sub(r'\s+', ' ', clean_text)
-        
+        clean_text = re.sub(r'\s+', ' ', soup.get_text(separator=' '))
         stop_keywords = r"(?:Bias Rating|Factual Reporting|Factuality|Country|Press Freedom|MBFC Credibility|Media Type|Traffic|World Press|$)"
         
         def pull_metric(keyword):
             match = re.search(rf"{keyword}\s*:\s*(.*?)(?=\s*(?:{stop_keywords}))", clean_text, re.IGNORECASE)
-            if match:
-                return match.group(1).replace('\u00a0', ' ').strip().rstrip('.')
+            if match: return match.group(1).replace('\u00a0', ' ').strip().rstrip('.')
             return None
 
         b = normalize_data(pull_metric(r"(?:Bias Rating|Bias)"), is_bias=True)
@@ -95,9 +85,8 @@ def analyze_article(article_url):
         if c: metrics["c"] = c
         if p: metrics["p"] = p
         if o: metrics["o"] = o
-
         return domain, metrics
-    except Exception as e:
+    except Exception:
         return None
 
 def main():
@@ -109,32 +98,50 @@ def main():
         try:
             res = session.get(endpoint, headers=headers, timeout=15)
             soup = BeautifulSoup(res.text, 'html.parser')
-            links = soup.find_all('a')
-            
-            for link in links:
+            for link in soup.find_all('a'):
                 href = link.get('href', '').strip()
                 if href.endswith('/'): href = href[:-1]
-                
                 if 'mediabiasfactcheck.com' in href and href not in visited_urls:
-                    if any(cat.strip('/') in href for cat in TARGET_ENDPOINTS) or href == "https://mediabiasfactcheck.com":
-                        continue
-                        
+                    if any(cat.strip('/') in href for cat in TARGET_ENDPOINTS) or href == "https://mediabiasfactcheck.com": continue
                     visited_urls.add(href)
-                    time.sleep(0.5) # The golden 0.5s anti-ban delay
-                    
+                    time.sleep(0.5)
                     result = analyze_article(href)
                     if result:
                         domain, metrics = result
                         if domain not in feed_analytics:
                             feed_analytics[domain] = metrics
                             print(f"  -> {domain} | Bias: {metrics.get('b', 'N/A')} | Fact: {metrics.get('f', 'N/A')}")
-                            
         except Exception as e:
             print(f"Error on {endpoint}: {e}")
 
-    with open('feed_intelligence.json', 'w', encoding='utf-8') as f:
+    # 1. SAVE THE APP feedratings.json', 'w', encoding='utf-8') as f:
         json.dump(feed_analytics, f, separators=(',', ':'))
-        print(f"\n[✓] Database compiled securely with {len(feed_analytics)} sources.")
+
+    # 2. GENERATE THE MARKDOWN DASHBOARD
+    b_counts, f_counts = {}, {}
+    for metrics in feed_analytics.values():
+        b = metrics.get('b', 'Unrated / None')
+        f = metrics.get('f', 'Unrated / None')
+        b_counts[b] = b_counts.get(b, 0) + 1
+        f_counts[f] = f_counts.get(f, 0) + 1
+
+    md = f"# 📊 Feed Ratings Database Statistics\n\n"
+    md += f"**Total Sources Analyzed:** `{len(feed_analytics)}`\n\n"
+    
+    md += "### ⚖️ Bias Distribution\n"
+    md += "| Bias Category | Count |\n| :--- | :--- |\n"
+    for k, v in sorted(b_counts.items(), key=lambda item: item[1], reverse=True):
+        md += f"| {k} | **{v}** |\n"
+
+    md += "\n### ✅ Factuality Distribution\n"
+    md += "| Factuality Rating | Count |\n| :--- | :--- |\n"
+    for k, v in sorted(f_counts.items(), key=lambda item: item[1], reverse=True):
+        md += f"| {k} | **{v}** |\n"
+
+    with open('ratings_statistics.md', 'w', encoding='utf-8') as f:
+        f.write(md)
+
+    print(f"\n[✓] Database compiled successfully! ({len(feed_analytics)} sources)")
 
 if __name__ == "__main__":
     main()
