@@ -1,17 +1,16 @@
 from curl_cffi import requests
 from bs4 import BeautifulSoup
-import json
-import time
-import random
-import re
-import os
-import sys
+import json, time, random, re, os
 from urllib.parse import urlparse
 
-DB_FILE = 'ratings.json'
-MD_FILE = 'statistics.md'
+# ── Configuration ───────────────────────────────────────────────────────────
+DB_FILE    = "ratings.json"
+MD_FILE    = "statistics.md"
+HOMEPAGE   = "https://mediabiasfactcheck.com/"
+RECHECK    = 14 * 86400                                   # skip if checked within 14 days
+MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", 0)) or None  # env override; 0 = unlimited
 
-TARGET_ENDPOINTS =[
+TARGET_ENDPOINTS = [
     "https://mediabiasfactcheck.com/left/",
     "https://mediabiasfactcheck.com/leftcenter/",
     "https://mediabiasfactcheck.com/center/",
@@ -20,212 +19,350 @@ TARGET_ENDPOINTS =[
     "https://mediabiasfactcheck.com/pro-science/",
     "https://mediabiasfactcheck.com/fake-news/",
     "https://mediabiasfactcheck.com/conspiracy/",
-    "https://mediabiasfactcheck.com/satire/"
+    "https://mediabiasfactcheck.com/satire/",
 ]
 
+# FIX #5: exact path matching instead of substring matching
+CATEGORY_PATHS = {urlparse(u).path.strip("/") for u in TARGET_ENDPOINTS}
+
 IGNORE_PATHS = {
-    "", "about", "contact", "methodology", "donate", "privacy", "terms-and-conditions", 
-    "faq", "badges", "membership-account", "filter-options", "submit-fact-check",
-    "daily-source-bias-check", "podcast", "search", "cookie-policy", "staff-and-writers"
+    "", "about", "contact", "methodology", "donate", "privacy",
+    "terms-and-conditions", "faq", "badges", "membership-account",
+    "filter-options", "submit-fact-check", "daily-source-bias-check",
+    "podcast", "search", "cookie-policy", "staff-and-writers",
 }
 
-# 🛡️ CLOUDFLARE BYPASS: Perfectly mimics Google Chrome v120 TLS Fingerprint. 
-# Cloudflare will not drop the connection anymore.
-session = requests.Session(impersonate="chrome120")
 
-def get_root_domain(url_string):
-    try:
-        return urlparse(url_string).netloc.replace('www.', '').lower()
-    except:
+# ── FIX #1-4: Robust HTTP client with warm-up, referer, adaptive delays ────
+class HTTPClient:
+    """curl_cffi session with Cloudflare bypass and adaptive rate-limiting."""
+
+    def __init__(self):
+        profile = random.choice(["chrome120", "chrome124"])
+        self.session = requests.Session(impersonate=profile)
+        self._consecutive_errors = 0
+        self.request_count = 0
+        print(f"[*] TLS fingerprint: {profile}")
+
+    def _adaptive_delay(self, kind):
+        """FIX #2: Human-realistic delays that grow with consecutive errors."""
+        if self._consecutive_errors >= 5:
+            base = random.uniform(30, 60)       # heavy backoff
+        elif self._consecutive_errors >= 2:
+            base = random.uniform(8, 15)        # moderate backoff
+        elif kind == "listing":
+            base = random.uniform(4, 8)         # listing pages: slow & careful
+        else:
+            base = random.uniform(2, 4)         # article pages: steady pace
+        time.sleep(base)
+
+    def get(self, url, *, kind="page", retries=3):
+        for attempt in range(retries):
+            self._adaptive_delay(kind)
+            try:
+                # FIX #3: always send Referer like a real browser
+                res = self.session.get(
+                    url, timeout=20,
+                    headers={"Referer": HOMEPAGE},
+                )
+                self.request_count += 1
+
+                if res.status_code == 200:
+                    self._consecutive_errors = 0
+                    return res
+
+                if res.status_code in (403, 429, 503):
+                    self._consecutive_errors += 1
+                    # FIX #4: exponential backoff → 60 s, 120 s, 240 s (cap 300 s)
+                    wait = min(60 * (2 ** attempt), 300)
+                    print(f"  [!] HTTP {res.status_code} → cooldown {wait}s "
+                          f"(attempt {attempt + 1}/{retries})")
+                    time.sleep(wait)
+                    continue
+
+                return None  # other status codes → don't retry
+            except Exception as exc:
+                self._consecutive_errors += 1
+                print(f"  [!] Network error: {exc}")
+                if attempt < retries - 1:
+                    time.sleep(15)
         return None
 
-def normalize_data(value, is_country=False, is_bias=False):
-    if not value: return None
+    def warmup(self):
+        """FIX #1: visit homepage first to establish cookies/session."""
+        print("[*] Warming up session (homepage visit)…")
+        if self.get(HOMEPAGE, kind="listing"):
+            print("[✓] Session cookies established.\n")
+            return True
+        print("[✗] Cannot reach MBFC homepage — aborting.\n")
+        return False
+
+
+http = HTTPClient()
+
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+def root_domain(url_str):
+    try:
+        return urlparse(url_str).netloc.replace("www.", "").lower()
+    except Exception:
+        return None
+
+
+def normalize(value, *, country=False, bias=False):
+    if not value:
+        return None
     v = value.strip()
-    v_upper = v.upper()
-    if v_upper in["", "UNKNOWN", "N/A", "NONE", "UNRATED"]: return None
-        
-    if is_country:
-        def fix_country_word(w):
+    if v.upper() in ("", "UNKNOWN", "N/A", "NONE", "UNRATED"):
+        return None
+
+    if country:
+        def _fix(w):
             w = w.strip()
-            w_up = w.upper()
-            if w_up in["US", "U.S.", "USA", "U.S.A.", "UNITED STATES", "UNITED STATES OF AMERICA"]: return "USA"
-            if w_up in["UK", "U.K.", "UNITED KINGDOM", "GREAT BRITAIN"]: return "UK"
-            if w_up in ["UAE", "EU"]: return w_up
-            return w.title() if len(w) > 3 else w_up
-        if ',' in v: return ', '.join([fix_country_word(c) for c in v.split(',')])
-        return fix_country_word(v)
-        
-    if is_bias:
-        if "SATIRE" in v_upper: return "Satire"
-        if "PRO-SCIENCE" in v_upper or "SCIENCE" in v_upper: return "Pro-Science"
-        if "CONSPIRACY" in v_upper or "PSEUDOSCIENCE" in v_upper: return "Conspiracy"
-        if "QUESTIONABLE" in v_upper or "FAKE NEWS" in v_upper: return "Questionable"
+            wu = w.upper()
+            if wu in ("US", "U.S.", "USA", "U.S.A.",
+                       "UNITED STATES", "UNITED STATES OF AMERICA"):
+                return "USA"
+            if wu in ("UK", "U.K.", "UNITED KINGDOM", "GREAT BRITAIN"):
+                return "UK"
+            if wu in ("UAE", "EU"):
+                return wu
+            return w.title() if len(w) > 3 else wu
+        if "," in v:
+            return ", ".join(_fix(c) for c in v.split(","))
+        return _fix(v)
+
+    if bias:
+        vu = v.upper()
+        if "SATIRE" in vu:                              return "Satire"
+        if "PRO-SCIENCE" in vu or vu == "SCIENCE":      return "Pro-Science"
+        if "CONSPIRACY" in vu or "PSEUDOSCIENCE" in vu:  return "Conspiracy"
+        if "QUESTIONABLE" in vu or "FAKE NEWS" in vu:    return "Questionable"
+
     return v.title()
 
+
+_DOMAIN_BLACKLIST = {
+    "mediabiasfactcheck", "twitter.com", "facebook.com",
+    "wikipedia.org", "patreon.com", "x.com", "instagram.com",
+}
+
+
 def extract_source_domain(soup):
-    source_tags = soup.find_all(string=re.compile(r'Source:\s*', re.IGNORECASE))
-    for tag in source_tags:
-        parent = tag.parent
-        link = parent.find_next('a')
-        if link and link.get('href'):
-            href = link.get('href')
-            if not any(x in href.lower() for x in['mediabiasfactcheck', 'twitter.com', 'facebook.com', 'wikipedia.org', 'patreon.com']):
-                domain = get_root_domain(href)
-                if domain and len(domain) > 3: return domain
+    for tag in soup.find_all(string=re.compile(r"Source:\s*", re.I)):
+        link = tag.parent.find_next("a")
+        if link and link.get("href"):
+            href = link["href"]
+            if not any(bl in href.lower() for bl in _DOMAIN_BLACKLIST):
+                dom = root_domain(href)
+                if dom and len(dom) > 3:
+                    return dom
     return None
 
-def save_database(feed_analytics):
-    with open(DB_FILE, 'w', encoding='utf-8') as f:
-        json.dump(feed_analytics, f, separators=(',', ':'))
-        
-    b_counts, f_counts = {}, {}
-    for metrics in feed_analytics.values():
-        b = metrics.get('b', 'Unrated / None')
-        f = metrics.get('f', 'Unrated / None')
-        b_counts[b] = b_counts.get(b, 0) + 1
-        f_counts[f] = f_counts.get(f, 0) + 1
 
-    md = f"# 📊 Feed Ratings Statistics\n\n**Total Sources:** `{len(feed_analytics)}`\n\n"
+# FIX #6: stop keywords must be followed by a colon (actual field labels only)
+_STOP_LABELS = (
+    r"(?:"
+    r"Bias Rating|Factual Reporting|Factuality Rating|Factuality|"
+    r"MBFC Credibility Rating|Credibility Rating|Credibility|"
+    r"Country Freedom Rating|Country Freedom|Press Freedom Rating|"
+    r"Press Freedom|Freedom Rating|Media Type|Traffic|Popularity|"
+    r"World Press|MBFC|Overall"
+    r")\s*:"
+)
+
+
+def _pull(text, keyword_pattern):
+    """Extract the value after 'Keyword: value' up to the next field label."""
+    m = re.search(
+        rf"{keyword_pattern}\s*:\s*(.*?)(?=\s*{_STOP_LABELS}|\.\s+(?=[A-Z])|\s-\s|$)",
+        text, re.I,
+    )
+    if m:
+        val = m.group(1).replace("\u00a0", " ").strip().rstrip(".-")
+        if 0 < len(val) <= 40:
+            return val
+    return None
+
+
+def scrape_metrics(soup):
+    text = re.sub(r"\s+", " ", soup.get_text(separator=" "))
+    return {
+        "b": normalize(_pull(text, r"(?:Bias Rating|Bias)"), bias=True),
+        "f": normalize(_pull(text, r"(?:Factual Reporting|Factuality Rating|Factuality)")),
+        "c": normalize(_pull(text, r"(?:MBFC Credibility Rating|Credibility Rating|Credibility)")),
+        "p": normalize(_pull(text, r"(?:Country Freedom Rating|Country Freedom|"
+                                   r"Press Freedom Rating|Press Freedom|Freedom Rating)")),
+        "o": normalize(_pull(text, r"Country(?!\s+Freedom)"), country=True),
+    }
+
+
+# ── Database I/O ───────────────────────────────────────────────────────────
+def save_database(db):
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(db, f, separators=(",", ":"))
+
+    bias_counts, fact_counts = {}, {}
+    for entry in db.values():
+        b = entry.get("b", "Unrated")
+        f = entry.get("f", "Unrated")
+        bias_counts[b] = bias_counts.get(b, 0) + 1
+        fact_counts[f] = fact_counts.get(f, 0) + 1
+
+    md = f"# 📊 Feed Ratings Statistics\n\n**Total Sources:** `{len(db)}`\n\n"
     md += "### ⚖️ Bias Distribution\n| Bias Category | Count |\n| :--- | :--- |\n"
-    for k, v in sorted(b_counts.items(), key=lambda item: item[1], reverse=True): md += f"| {k} | **{v}** |\n"
+    for k, v in sorted(bias_counts.items(), key=lambda x: x[1], reverse=True):
+        md += f"| {k} | **{v}** |\n"
     md += "\n### ✅ Factuality Distribution\n| Factuality Rating | Count |\n| :--- | :--- |\n"
-    for k, v in sorted(f_counts.items(), key=lambda item: item[1], reverse=True): md += f"| {k} | **{v}** |\n"
+    for k, v in sorted(fact_counts.items(), key=lambda x: x[1], reverse=True):
+        md += f"| {k} | **{v}** |\n"
+    with open(MD_FILE, "w", encoding="utf-8") as f:
+        f.write(md)
 
-    with open(MD_FILE, 'w', encoding='utf-8') as f: f.write(md)
 
-def main():
-    feed_analytics = {}
+def load_database():
     if os.path.exists(DB_FILE):
         try:
-            with open(DB_FILE, 'r', encoding='utf-8') as f: feed_analytics = json.load(f)
-            print(f"[+] Loaded existing database: {len(feed_analytics)} entries.")
-        except: pass
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                db = json.load(f)
+            print(f"[+] Loaded existing database: {len(db)} entries")
+            return db
+        except Exception:
+            pass
+    return {}
 
-    # Failsafe: Create the DB file immediately so Git never crashes
-    save_database(feed_analytics)
 
-    print("\n=== [1] HARVESTING ALL TARGET URLS ===")
-    article_urls_to_scan = set()
-    for endpoint in TARGET_ENDPOINTS:
-        success = False
-        
-        for attempt in range(3):
-            try:
-                time.sleep(random.uniform(1.0, 2.5))
-                res = session.get(endpoint, timeout=15)
-                if res.status_code in [403, 429]:
-                    print(f"  [!] Rate limit on {endpoint}. Cooldown 3 mins... ({attempt+1}/3)")
-                    time.sleep(180)
-                    continue
-                if res.status_code == 200:
-                    success = True
-                    break
-            except Exception as e:
-                pass
-                
-        if not success:
-            print(f"  [X] Failed to harvest {endpoint}. Block active.")
+# ── Pipeline ────────────────────────────────────────────────────────────────
+def harvest_urls():
+    """Phase 1: collect all source-page URLs from category listing pages."""
+    print("\n=== PHASE 1 · HARVESTING SOURCE URLS ===")
+    urls = set()
+
+    # FIX #8: randomise the order we hit category pages
+    endpoints = list(TARGET_ENDPOINTS)
+    random.shuffle(endpoints)
+
+    for endpoint in endpoints:
+        res = http.get(endpoint, kind="listing")
+        if not res:
+            print(f"  [✗] Failed: {endpoint}")
             continue
-            
-        try:
-            soup = BeautifulSoup(res.text, 'html.parser')
-            content_area = soup.find('div', class_='entry-content') or soup.find('table', id='mbfc-table')
-            if not content_area: 
-                continue
-                
-            for link in content_area.find_all('a', href=True):
-                href = link.get('href').strip().rstrip('/')
-                if href.startswith("https://mediabiasfactcheck.com/"):
-                    path = urlparse(href).path.strip('/')
-                    if not path or path in IGNORE_PATHS or any(c.strip('/') in href for c in TARGET_ENDPOINTS): continue
-                    article_urls_to_scan.add(href)
-        except Exception as e:
-            print(f"  [!] Error parsing {endpoint}: {e}")
 
-    urls_to_process = list(article_urls_to_scan)
-    total = len(urls_to_process)
-    print(f"\n=== [2] FULL SYNC: ANALYZING ALL {total} SOURCES ===")
-    if total == 0: 
-        print("[✓] 0 sources to process. Exiting gracefully.")
+        soup = BeautifulSoup(res.text, "html.parser")
+        content_area = (soup.find("div", class_="entry-content")
+                        or soup.find("table", id="mbfc-table"))
+        if not content_area:
+            print(f"  [!] No content area found: {endpoint}")
+            continue
+
+        count = 0
+        for link in content_area.find_all("a", href=True):
+            href = link["href"].strip().rstrip("/")
+            if not href.startswith("https://mediabiasfactcheck.com/"):
+                continue
+            path = urlparse(href).path.strip("/")
+            # FIX #5: exact path comparison, not substring
+            if path and path not in IGNORE_PATHS and path not in CATEGORY_PATHS:
+                urls.add(href)
+                count += 1
+
+        label = endpoint.split("/")[-2]
+        print(f"  [✓] {label:20s} → {count} sources")
+
+    print(f"\n  Total unique URLs harvested: {len(urls)}")
+    return urls
+
+
+def process_sources(db, urls):
+    """Phase 2: visit each source page, extract metrics, update database."""
+    now = int(time.time())
+
+    # FIX #7: skip sources that were checked recently
+    recently_checked = {
+        entry["u"] for entry in db.values()
+        if entry.get("chk", 0) > now - RECHECK
+    }
+    todo = [u for u in urls if u not in recently_checked]
+
+    # FIX #8: randomise processing order
+    random.shuffle(todo)
+
+    # Optional: cap per-run volume for CI time limits
+    if MAX_PER_RUN:
+        todo = todo[:MAX_PER_RUN]
+
+    skipped = len(urls) - len(todo)
+    total = len(todo)
+    print(f"\n=== PHASE 2 · PROCESSING {total} SOURCES ({skipped} skipped) ===")
+
+    if total == 0:
+        print("[✓] All sources are up-to-date.")
+        return 0, 0
+
+    new_count = updated_count = 0
+
+    for i, url in enumerate(todo, 1):
+        res = http.get(url)
+        if not res:
+            print(f"  [{i}/{total}] [✗] {url}")
+            continue
+
+        soup = BeautifulSoup(res.text, "html.parser")
+        domain = extract_source_domain(soup)
+        if not domain:
+            continue
+
+        met = scrape_metrics(soup)
+        entry = {"u": url, "chk": int(time.time())}
+        for key, val in met.items():
+            if val:
+                entry[key] = val
+
+        if domain in db:
+            old = db[domain]
+            changed = any(old.get(k) != entry.get(k) for k in ("b", "f", "c", "p", "o"))
+            if changed:
+                db[domain] = entry
+                updated_count += 1
+                print(f"  [{i}/{total}] [~] UPDATED: {domain} | {met['b']} | {met['f']}")
+            else:
+                db[domain]["chk"] = entry["chk"]
+                print(f"  [{i}/{total}] [-] {domain}")
+        else:
+            db[domain] = entry
+            new_count += 1
+            print(f"  [{i}/{total}] [+] NEW: {domain} | {met['b']} | {met['f']}")
+
+        # Checkpoint every 25 entries (more frequent than the original 50)
+        if i % 25 == 0:
+            save_database(db)
+            print(f"  ── checkpoint: {len(db)} total | "
+                  f"+{new_count} new | ~{updated_count} updated ──")
+
+    return new_count, updated_count
+
+
+def main():
+    db = load_database()
+    save_database(db)  # ensure files exist for CI
+
+    # FIX #1: warm up session before any real work
+    if not http.warmup():
         return
 
-    for index, article_url in enumerate(urls_to_process, start=1):
-        success = False
-        
-        for attempt in range(3):
-            try:
-                time.sleep(random.uniform(0.3, 0.7))
-                res = session.get(article_url, timeout=10)
-                if res.status_code in[403, 429]:
-                    print(f"\n🚨 [WARNING] Cloudflare Block (Status {res.status_code}).")
-                    print(f"⏳ Initiating perfect cooldown (3 minutes) before auto-resuming... (Attempt {attempt+1}/3)")
-                    time.sleep(180) 
-                    continue
-                if res.status_code != 200: break
-                success = True
-                break
-            except Exception:
-                pass
-                
-        if not success:
-            print(f"[{index}/{total}] [X] Failed/Skipped: {article_url}")
-            continue
+    urls = harvest_urls()
+    if not urls:
+        print("[✓] No source URLs found. Exiting.")
+        return
 
-        soup = BeautifulSoup(res.text, 'html.parser')
-        domain = extract_source_domain(soup)
-        if not domain: continue
-            
-        clean_text = re.sub(r'\s+', ' ', soup.get_text(separator=' '))
-        
-        # --- PARAGRAPH BLOCKER LOGIC ---
-        stop_keywords = r"(?:Bias Rating|Bias|Factual Reporting|Factuality Rating|Factuality|MBFC Credibility Rating|Credibility Rating|Credibility|Country Freedom Rating|Country Freedom|Press Freedom Rating|Press Freedom|Freedom Rating|Media Type|Traffic|World Press|$)"
-        
-        def pull_metric(kw):
-            # 1. Matches only if there is a COLON
-            # 2. Stops if it hits a sentence-ending period (e.g. '. T') or a dash (' - ')
-            match = re.search(rf"{kw}\s*:\s*(.*?)(?=\s*(?:{stop_keywords})|\.\s+(?=[A-Z])|\s-\s|$)", clean_text, re.IGNORECASE)
-            if match:
-                val = match.group(1).replace('\u00a0', ' ').strip().rstrip('.-')
-                # 3. Ultimate Failsafe: Ratings are never longer than 40 chars. 
-                if len(val) <= 40:
-                    return val
-            return None
+    new_count, updated_count = process_sources(db, urls)
 
-        current_time = int(time.time())
-        new_data = {"u": article_url, "chk": current_time}
-        
-        b = normalize_data(pull_metric(r"(?:Bias Rating|Bias)"), is_bias=True)
-        f = normalize_data(pull_metric(r"(?:Factual Reporting|Factuality Rating|Factuality)"))
-        c = normalize_data(pull_metric(r"(?:MBFC Credibility Rating|Credibility Rating|Credibility)"))
-        p = normalize_data(pull_metric(r"(?:Country Freedom Rating|Country Freedom|Press Freedom Rating|Press Freedom|Freedom Rating)"))
-        o = normalize_data(pull_metric(r"Country(?!\s+Freedom)"), is_country=True)
+    print("\n=== PHASE 3 · FINALIZING ===")
+    save_database(db)
+    print(f"[✓] Complete — {len(db)} total sources | "
+          f"+{new_count} new | ~{updated_count} updated | "
+          f"{http.request_count} HTTP requests made")
 
-        if b: new_data["b"] = b
-        if f: new_data["f"] = f
-        if c: new_data["c"] = c
-        if p: new_data["p"] = p
-        if o: new_data["o"] = o
-
-        if domain in feed_analytics:
-            old_data = feed_analytics[domain]
-            has_changed = any(old_data.get(k) != new_data.get(k) for k in ['b', 'f', 'c', 'p', 'o'])
-            
-            if has_changed:
-                feed_analytics[domain] = new_data
-                print(f"  [{index}/{total}] [~] UPDATED: {domain} | Bias: {b} | Fact: {f}")
-            else:
-                feed_analytics[domain]["chk"] = current_time 
-                print(f"  [{index}/{total}] [-] NO CHANGE: {domain}")
-        else:
-            feed_analytics[domain] = new_data
-            print(f"[{index}/{total}] [+] NEW: {domain} | Bias: {b} | Fact: {f}")
-
-        if index % 50 == 0: save_database(feed_analytics)
-
-    print("\n===[3] FINALIZING DATABASE ===")
-    save_database(feed_analytics)
-    print(f"[✓] Database successfully synced! ({len(feed_analytics)} sources total)")
 
 if __name__ == "__main__":
     main()
