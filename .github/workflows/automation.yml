@@ -21,9 +21,8 @@ jobs:
           python-version: '3.10'
 
       - name: Install Dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install cloudscraper
+        # CRITICAL: We use curl_cffi to mathematically spoof Google Chrome and bypass Cloudflare
+        run: pip install beautifulsoup4 curl_cffi
 
       - name: Run Intel Compiler
         run: python -u intel_compiler.py
@@ -32,7 +31,6 @@ jobs:
         run: |
           git config --global user.name "Analyzer-Bot"
           git config --global user.email "bot@feedanalyzer.local"
-          # || true ensures git doesn't crash if files are already tracked
           git add ratings.json statistics.md || true
           
           if git diff --staged --quiet; then
