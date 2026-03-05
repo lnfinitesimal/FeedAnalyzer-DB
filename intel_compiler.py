@@ -8,7 +8,7 @@ DB_FILE     = "ratings.json"
 MD_FILE     = "statistics.md"
 HOMEPAGE    = "https://mediabiasfactcheck.com/"
 RECHECK     = 7 * 86400
-MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", 200))
+MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", 150))
 
 TARGET_ENDPOINTS = {
     "https://mediabiasfactcheck.com/left/": "Left",
@@ -60,20 +60,18 @@ class HTTPClient:
         self.session = requests.Session(impersonate="chrome")
         self.request_count = 0
         self.penalty = 1.0
-        self._next_rest = random.randint(25, 35)
+        self._next_rest = random.randint(30, 40)
 
     def get(self, url, *, kind="page", attempts=3):
         for attempt in range(attempts):
-            # 12-16s base × penalty → ~4 req/min nominal
-            base = random.uniform(14, 18) if kind == "listing" else random.uniform(12, 16)
+            base = random.uniform(25, 30) if kind == "listing" else random.uniform(18, 22)
             time.sleep(base * self.penalty)
 
-            # Rest break every 25-35 requests
             if self.request_count > 0 and self.request_count >= self._next_rest:
-                rest = random.uniform(45, 65)
+                rest = random.uniform(50, 70)
                 print(f"  [zZz] Rest break ({rest:.0f}s)")
                 time.sleep(rest)
-                self._next_rest = self.request_count + random.randint(25, 35)
+                self._next_rest = self.request_count + random.randint(30, 40)
 
             try:
                 headers = {
@@ -86,13 +84,13 @@ class HTTPClient:
 
                 if res.status_code == 200:
                     if self.penalty > 1.0:
-                        self.penalty = max(1.0, self.penalty - 0.1)
+                        self.penalty = max(1.0, self.penalty - 0.05)
                     return res
 
                 if res.status_code in (429, 403, 503):
-                    self.penalty = min(3.0, self.penalty + 0.5)
+                    self.penalty = min(3.0, self.penalty + 0.3)
                     wait = random.uniform(60, 90) * self.penalty
-                    print(f"  [!] HTTP {res.status_code} — absorbing ({wait:.0f}s cooldown, penalty now {self.penalty:.1f}x)")
+                    print(f"  [!] HTTP {res.status_code} — absorbing ({wait:.0f}s, penalty {self.penalty:.1f}x)")
                     time.sleep(wait)
                     continue
 
@@ -125,6 +123,7 @@ def clean_value(val):
     return val.strip(" .-").upper()
 
 def truncate_dom(soup):
+    """For harvest link extraction ONLY — not for metrics."""
     raw = soup.find("div", class_="entry-content")
     if not raw:
         return None
@@ -153,16 +152,19 @@ def extract_metric(text, pattern, whitelist=None):
     return None
 
 def scrape_metrics(soup):
-    content = truncate_dom(soup)
+    """Extract from FULL page content — no truncation."""
+    content = soup.find("div", class_="entry-content")
     if not content:
         return {}
     text = content.get_text(separator="\n", strip=True)
+
     metrics = {
         "f": extract_metric(text, r"(?:Factual Reporting|Factuality Rating|Factuality|Factual Report)\s*[:\-–—]\s*([^\n]+)", VALID_FACTUALITY),
         "c": extract_metric(text, r"(?:MBFC'?s?\s+Credibility\s+Rating|Credibility\s+Rating)\s*[:\-–—]\s*([^\n]+)", VALID_CREDIBILITY),
         "p": extract_metric(text, r"(?:Country Freedom Rating|Press Freedom Rating|Freedom of the Press Rating|Freedom Rating|Press Freedom)\s*[:\-–—]\s*([^\n]+)", VALID_FREEDOM),
         "o": extract_metric(text, r"(?:Country|Based in|Location)\s*[:\-–—]\s*([^\n(,]+)"),
     }
+
     if not metrics["f"] or not metrics["c"]:
         for img in content.find_all("img"):
             alt = (img.get("alt") or "").upper().strip()
@@ -176,6 +178,7 @@ def scrape_metrics(soup):
                     if v in alt:
                         metrics["c"] = v.title()
                         break
+
     if metrics["o"]:
         wu = metrics["o"].upper()
         if re.search(r'\b(US|USA|UNITED STATES|UNITED STATES OF AMERICA)\b', wu) or re.search(r'(?<!\w)U\.S\.A?\.?(?!\w)', wu):
@@ -185,6 +188,7 @@ def scrape_metrics(soup):
         else:
             cosmetic = metrics["o"].title().replace(" And ", " and ").replace(" Of ", " of ")
             metrics["o"] = COUNTRY_NORMALIZE.get(wu, cosmetic)
+
     return {k: v for k, v in metrics.items() if v}
 
 def extract_source_domain(soup):
@@ -230,8 +234,10 @@ def save_database(db):
         if key.startswith("_fail:"):
             continue
         valid += 1
-        bias_ct[entry.get("b", "Unrated")] = bias_ct.get(entry.get("b", "Unrated"), 0) + 1
-        fact_ct[entry.get("f", "Unrated")] = fact_ct.get(entry.get("f", "Unrated"), 0) + 1
+        b = entry.get("b", "Unrated")
+        fc = entry.get("f", "Unrated")
+        bias_ct[b] = bias_ct.get(b, 0) + 1
+        fact_ct[fc] = fact_ct.get(fc, 0) + 1
 
     md = f"# 📊 Feed Ratings Statistics\n\n**Total Sources:** `{valid}`\n\n"
     md += "### ⚖️ Bias Distribution\n| Bias Category | Count |\n| :--- | :--- |\n"
@@ -261,11 +267,11 @@ def harvest_urls(db):
         print("[*] Bootstrap mode — harvesting all categories")
         to_check = endpoints
     else:
-        to_check = endpoints[:2]
+        to_check = endpoints[:3]
 
     for endpoint in to_check:
         if http.penalty >= 2.5:
-            print("[!] Circuit breaker — stopping harvest")
+            print("  [!] Circuit breaker — stopping harvest")
             break
         res = http.get(endpoint, kind="listing")
         if not res:
@@ -364,14 +370,14 @@ def process_sources(db, url_bias_map):
             if changed:
                 db[domain] = entry
                 upd_ct += 1
-                print(f"  [{i}/{total}] [~] {domain} | {entry.get('b')} | {entry.get('f', '—')}")
+                print(f"  [{i}/{total}] [~] {domain} | {entry.get('b')} | F:{entry.get('f', '—')} C:{entry.get('c', '—')} P:{entry.get('p', '—')} O:{entry.get('o', '—')}")
             else:
                 db[domain]["chk"] = now
                 print(f"  [{i}/{total}] [-] {domain}")
         else:
             db[domain] = entry
             new_ct += 1
-            print(f"  [{i}/{total}] [+] {domain} | {entry.get('b')} | {entry.get('f', '—')}")
+            print(f"  [{i}/{total}] [+] {domain} | {entry.get('b')} | F:{entry.get('f', '—')} C:{entry.get('c', '—')} P:{entry.get('p', '—')} O:{entry.get('o', '—')}")
 
         if i % 25 == 0:
             save_database(db)
@@ -388,13 +394,13 @@ def main():
     url_bias_map = harvest_urls(db)
     if not url_bias_map or http.penalty >= 2.5:
         if http.penalty >= 2.5:
-            print("[!] Circuit breaker tripped during harvest — saving and exiting")
+            print("[!] Circuit breaker during harvest — saving and exiting")
             save_database(db)
         return
 
     print(f"\n  [*] Harvested: {len(url_bias_map)} URLs")
 
-    cooldown = random.uniform(60, 90)
+    cooldown = random.uniform(90, 120)
     print(f"  [*] Inter-phase cooldown: {cooldown:.0f}s")
     time.sleep(cooldown)
 
