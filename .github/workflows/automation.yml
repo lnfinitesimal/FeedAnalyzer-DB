@@ -21,7 +21,9 @@ jobs:
           python-version: '3.10'
 
       - name: Install Dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install cloudscraper
 
       - name: Run Intel Compiler
         run: python -u intel_compiler.py
@@ -30,7 +32,8 @@ jobs:
         run: |
           git config --global user.name "Analyzer-Bot"
           git config --global user.email "bot@feedanalyzer.local"
-          git add ratings.json statistics.md
+          # || true ensures git doesn't crash if files are already tracked
+          git add ratings.json statistics.md || true
           
           if git diff --staged --quiet; then
             echo "No changes detected. Skipping commit."
