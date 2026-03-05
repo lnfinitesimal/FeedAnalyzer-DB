@@ -2,7 +2,7 @@ name: DB Intel Automation
 
 on:
   schedule:
-    - cron: '0 2 * * *'  # Runs once daily to save GitHub Action minutes!
+    - cron: '0 2 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   compile-intel:
-    runs-on: ubuntu-24.04  # FIX: Forces GitHub to use a newer, unburned IP pool
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - name: Checkout Code
@@ -30,22 +30,19 @@ jobs:
 
       - name: Run Intel Compiler
         env:
-          MAX_PER_RUN: 150  # 150 max to guarantee it fits perfectly within the time limit
+          MAX_PER_RUN: 200
         run: python -u intel_compiler.py
 
       - name: Commit Database
         run: |
           git config --global user.name "Analyzer-Bot"
           git config --global user.email "bot@feedanalyzer.local"
-          
-          git pull --rebase origin main || true
+          git pull --rebase origin main
           git add ratings.json statistics.md
-          
           if git diff --staged --quiet; then
-            echo "No changes detected. Skipping commit."
+            echo "No changes detected."
             exit 0
           else
             git commit -m "Automated Intel DB update"
             git push
-            echo "Database successfully pushed to repository."
           fi
