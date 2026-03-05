@@ -1,4 +1,4 @@
-import requests
+from curl_cffi import requests
 from bs4 import BeautifulSoup
 import json
 import time
@@ -7,14 +7,6 @@ import re
 import os
 import sys
 from urllib.parse import urlparse
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
-# --- NEW: Cloudflare Bypasser for GitHub Actions ---
-try:
-    import cloudscraper
-except ImportError:
-    cloudscraper = None
 
 DB_FILE = 'ratings.json'
 MD_FILE = 'statistics.md'
@@ -37,24 +29,9 @@ IGNORE_PATHS = {
     "daily-source-bias-check", "podcast", "search", "cookie-policy", "staff-and-writers"
 }
 
-# Emulate a real browser to bypass CF on GitHub Actions
-if cloudscraper:
-    session = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
-else:
-    session = requests.Session()
-
-retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-adapter = HTTPAdapter(max_retries=retries, pool_connections=20, pool_maxsize=20)
-session.mount('http://', adapter)
-session.mount('https://', adapter)
-
-headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1'
-}
+# 🛡️ CLOUDFLARE BYPASS: Perfectly mimics Google Chrome v120 TLS Fingerprint. 
+# Cloudflare will not drop the connection anymore.
+session = requests.Session(impersonate="chrome120")
 
 def get_root_domain(url_string):
     try:
@@ -125,7 +102,7 @@ def main():
             print(f"[+] Loaded existing database: {len(feed_analytics)} entries.")
         except: pass
 
-    # --- CRITICAL FIX: Ensure files are created immediately so Git never fails ---
+    # Failsafe: Create the DB file immediately so Git never crashes
     save_database(feed_analytics)
 
     print("\n=== [1] HARVESTING ALL TARGET URLS ===")
@@ -133,30 +110,28 @@ def main():
     for endpoint in TARGET_ENDPOINTS:
         success = False
         
-        # --- CRITICAL FIX: Phase 1 Cooldown Loop ---
         for attempt in range(3):
             try:
                 time.sleep(random.uniform(1.0, 2.5))
-                res = session.get(endpoint, headers=headers, timeout=15)
-                if res.status_code in[403, 429]:
-                    print(f"  [!] Cloudflare Block on {endpoint}. Cooldown 3 mins... ({attempt+1}/3)")
+                res = session.get(endpoint, timeout=15)
+                if res.status_code in [403, 429]:
+                    print(f"  [!] Rate limit on {endpoint}. Cooldown 3 mins... ({attempt+1}/3)")
                     time.sleep(180)
                     continue
                 if res.status_code == 200:
                     success = True
                     break
-            except requests.exceptions.Timeout:
+            except Exception as e:
                 pass
                 
         if not success:
-            print(f"  [X] Failed to harvest {endpoint}. CF Block active.")
+            print(f"  [X] Failed to harvest {endpoint}. Block active.")
             continue
             
         try:
             soup = BeautifulSoup(res.text, 'html.parser')
             content_area = soup.find('div', class_='entry-content') or soup.find('table', id='mbfc-table')
             if not content_area: 
-                print(f"  [?] No content found on {endpoint}. (Possible CF challenge)")
                 continue
                 
             for link in content_area.find_all('a', href=True):
@@ -181,7 +156,7 @@ def main():
         for attempt in range(3):
             try:
                 time.sleep(random.uniform(0.3, 0.7))
-                res = session.get(article_url, headers=headers, timeout=10)
+                res = session.get(article_url, timeout=10)
                 if res.status_code in[403, 429]:
                     print(f"\n🚨 [WARNING] Cloudflare Block (Status {res.status_code}).")
                     print(f"⏳ Initiating perfect cooldown (3 minutes) before auto-resuming... (Attempt {attempt+1}/3)")
@@ -190,7 +165,7 @@ def main():
                 if res.status_code != 200: break
                 success = True
                 break
-            except requests.exceptions.Timeout:
+            except Exception:
                 pass
                 
         if not success:
@@ -203,17 +178,23 @@ def main():
             
         clean_text = re.sub(r'\s+', ' ', soup.get_text(separator=' '))
         
-        # --- CRITICAL FIX: Master Regex Stop Keywords ---
+        # --- PARAGRAPH BLOCKER LOGIC ---
         stop_keywords = r"(?:Bias Rating|Bias|Factual Reporting|Factuality Rating|Factuality|MBFC Credibility Rating|Credibility Rating|Credibility|Country Freedom Rating|Country Freedom|Press Freedom Rating|Press Freedom|Freedom Rating|Media Type|Traffic|World Press|$)"
         
         def pull_metric(kw):
-            match = re.search(rf"{kw}\s*:\s*(.*?)(?=\s*(?:{stop_keywords}))", clean_text, re.IGNORECASE)
-            return match.group(1).replace('\u00a0', ' ').strip().rstrip('.') if match else None
+            # 1. Matches only if there is a COLON
+            # 2. Stops if it hits a sentence-ending period (e.g. '. T') or a dash (' - ')
+            match = re.search(rf"{kw}\s*:\s*(.*?)(?=\s*(?:{stop_keywords})|\.\s+(?=[A-Z])|\s-\s|$)", clean_text, re.IGNORECASE)
+            if match:
+                val = match.group(1).replace('\u00a0', ' ').strip().rstrip('.-')
+                # 3. Ultimate Failsafe: Ratings are never longer than 40 chars. 
+                if len(val) <= 40:
+                    return val
+            return None
 
         current_time = int(time.time())
         new_data = {"u": article_url, "chk": current_time}
         
-        # --- CRITICAL FIX: Master Metric Selectors ---
         b = normalize_data(pull_metric(r"(?:Bias Rating|Bias)"), is_bias=True)
         f = normalize_data(pull_metric(r"(?:Factual Reporting|Factuality Rating|Factuality)"))
         c = normalize_data(pull_metric(r"(?:MBFC Credibility Rating|Credibility Rating|Credibility)"))
@@ -228,7 +209,7 @@ def main():
 
         if domain in feed_analytics:
             old_data = feed_analytics[domain]
-            has_changed = any(old_data.get(k) != new_data.get(k) for k in['b', 'f', 'c', 'p', 'o'])
+            has_changed = any(old_data.get(k) != new_data.get(k) for k in ['b', 'f', 'c', 'p', 'o'])
             
             if has_changed:
                 feed_analytics[domain] = new_data
