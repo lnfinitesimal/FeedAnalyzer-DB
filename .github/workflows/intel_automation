@@ -5,7 +5,6 @@ on:
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
-# FIX: Concurrency guard prevents overlapping runs from corrupting Git history
 concurrency:
   group: intel-automation
   cancel-in-progress: false
@@ -31,7 +30,7 @@ jobs:
 
       - name: Run Intel Compiler
         env:
-          MAX_PER_RUN: 400
+          MAX_PER_RUN: 250  # Reduced to 250 to allow slower, safer scraping
         run: python -u intel_compiler.py
 
       - name: Commit Database
