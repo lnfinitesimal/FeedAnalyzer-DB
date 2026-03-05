@@ -2,8 +2,13 @@ name: DB Intel Automation
 
 on:
   schedule:
-    - cron: '0 2 * * 0'
+    - cron: '0 */6 * * *'
   workflow_dispatch:
+
+# FIX: Concurrency guard prevents overlapping runs from corrupting Git history
+concurrency:
+  group: intel-automation
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -11,27 +16,31 @@ permissions:
 jobs:
   compile-intel:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Install Dependencies
-        # CRITICAL: We use curl_cffi to mathematically spoof Google Chrome and bypass Cloudflare
         run: pip install beautifulsoup4 curl_cffi
 
       - name: Run Intel Compiler
+        env:
+          MAX_PER_RUN: 400
         run: python -u intel_compiler.py
 
       - name: Commit Database
         run: |
           git config --global user.name "Analyzer-Bot"
           git config --global user.email "bot@feedanalyzer.local"
-          git add ratings.json statistics.md || true
+          
+          git pull --rebase origin main
+          git add ratings.json statistics.md
           
           if git diff --staged --quiet; then
             echo "No changes detected. Skipping commit."
