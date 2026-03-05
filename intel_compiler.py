@@ -8,7 +8,7 @@ DB_FILE    = "ratings.json"
 MD_FILE    = "statistics.md"
 HOMEPAGE   = "https://mediabiasfactcheck.com/"
 RECHECK    = 7 * 86400  # 7 days
-MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", 250))
+MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", 150))
 
 TARGET_ENDPOINTS = {
     "https://mediabiasfactcheck.com/left/": "Left",
@@ -61,15 +61,15 @@ class HTTPClient:
         self.session = requests.Session(impersonate=profile)
         self.request_count = 0
         self.penalty_multiplier = 1.0
-        self.next_rest = random.randint(40, 50)
+        self.next_rest = random.randint(30, 40)
         print(f"[*] TLS fingerprint: {profile}")
 
     def _delay(self, kind):
-        # FIX: Slower delays to prevent Cloudflare 429 Datacenter bans
         if kind == "listing":
             base = random.uniform(18, 24)
         else:
-            base = random.uniform(8, 11)
+            # FIX: 14-18s mathematically guarantees we stay under 5 req/min
+            base = random.uniform(14, 18)
         time.sleep(base * self.penalty_multiplier)
 
     def get(self, url, *, kind="page", attempts=3):
@@ -77,10 +77,10 @@ class HTTPClient:
             self._delay(kind)
             
             if self.request_count > 0 and self.request_count >= self.next_rest:
-                rest = random.uniform(45, 75)
+                rest = random.uniform(45, 60)
                 print(f"  [zZz] Organic rest break for {rest:.1f}s...")
                 time.sleep(rest)
-                self.next_rest = self.request_count + random.randint(40, 50)
+                self.next_rest = self.request_count + random.randint(30, 40)
 
             try:
                 res = self.session.get(url, timeout=20, headers={"Referer": HOMEPAGE})
@@ -88,12 +88,12 @@ class HTTPClient:
 
                 if res.status_code == 200:
                     if self.penalty_multiplier > 1.0:
-                        self.penalty_multiplier = max(1.0, self.penalty_multiplier - 0.1)
+                        self.penalty_multiplier = max(1.0, self.penalty_multiplier - 0.2)
                     return res
 
                 if res.status_code in (403, 429, 503):
-                    self.penalty_multiplier = 1.5 
-                    wait = random.uniform(60, 120)
+                    self.penalty_multiplier = min(3.0, self.penalty_multiplier + 0.5) 
+                    wait = random.uniform(60, 90) * self.penalty_multiplier
                     print(f"  [!] HTTP {res.status_code} → Penalty triggered. Cooldown {wait:.1f}s")
                     time.sleep(wait)
                     continue
@@ -219,6 +219,7 @@ def load_database():
     return {}
 
 def save_database(db):
+    # 1. Atomic write for JSON
     fd, tmp_path = tempfile.mkstemp(dir=".", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -228,6 +229,7 @@ def save_database(db):
         os.unlink(tmp_path)
         raise
     
+    # Generate MD Stats
     bias_counts, fact_counts = {}, {}
     valid_entries = 0
     for key, entry in db.items():
@@ -243,16 +245,31 @@ def save_database(db):
     for k, v in sorted(bias_counts.items(), key=lambda x: x[1], reverse=True): md += f"| {k} | **{v}** |\n"
     md += "\n### ✅ Factuality Distribution\n| Factuality Rating | Count |\n| :--- | :--- |\n"
     for k, v in sorted(fact_counts.items(), key=lambda x: x[1], reverse=True): md += f"| {k} | **{v}** |\n"
-    with open(MD_FILE, "w", encoding="utf-8") as f:
-        f.write(md)
+    
+    # FIX: Atomic write for Markdown too
+    fd2, tmp_md = tempfile.mkstemp(dir=".", suffix=".tmp")
+    try:
+        with os.fdopen(fd2, "w", encoding="utf-8") as f:
+            f.write(md)
+        os.replace(tmp_md, MD_FILE)
+    except Exception:
+        os.unlink(tmp_md)
+        raise
 
-def harvest_urls():
+def harvest_urls(db):
     print("\n=== PHASE 1 · HARVESTING SOURCE URLS ===")
     url_bias_map = {}
     endpoints = list(TARGET_ENDPOINTS.keys())
     random.shuffle(endpoints)
 
-    for endpoint in endpoints:
+    # FIX: Bootstrap Mode. If DB is empty, harvest ALL categories to build the index immediately.
+    if not db:
+        print("[*] Bootstrap mode: DB is empty. Harvesting ALL categories to build index.")
+        endpoints_to_check = endpoints
+    else:
+        endpoints_to_check = endpoints[:2]
+
+    for endpoint in endpoints_to_check:
         res = http.get(endpoint, kind="listing")
         if not res: continue
 
@@ -288,6 +305,8 @@ def process_sources(db, url_bias_map):
         mbfc_url = entry.get("u")
         if mbfc_url:
             url_to_domain[mbfc_url] = domain
+            if mbfc_url not in url_bias_map and "b" in entry:
+                url_bias_map[mbfc_url] = entry["b"]
 
     def last_checked(mbfc_url):
         fail_key = f"_fail:{mbfc_url}"
@@ -314,6 +333,12 @@ def process_sources(db, url_bias_map):
     new_count = updated_count = 0
 
     for i, url in enumerate(todo_urls, 1):
+        
+        # FIX: Circuit Breaker! Abort gracefully if Cloudflare puts us in timeout jail.
+        if http.penalty_multiplier >= 2.5:
+            print(f"\n[!] Circuit breaker tripped at {i}/{total}. Cloudflare is too aggressive. Saving and exiting gracefully.")
+            break
+
         res = http.get(url)
         if not res:
             print(f"[{i}/{total}] [✗] {url}")
@@ -340,7 +365,6 @@ def process_sources(db, url_bias_map):
         entry = {"u": url, "chk": now, "b": url_bias_map[url]}
         entry.update(met)
 
-        # FIX: Explicitly print all 5 values to the terminal so you can see them!
         if domain in db:
             old = db[domain]
             data_changed = any(old.get(k) != entry.get(k) for k in ("b", "f", "c", "p", "o"))
@@ -366,7 +390,8 @@ def main():
 
     if not http.warmup(): return
 
-    url_bias_map = harvest_urls()
+    # FIX: Pass the DB to harvest_urls so it can check if we need to Bootstrap
+    url_bias_map = harvest_urls(db)
     if not url_bias_map: return
     
     print(f"\n[*] Total harvested URLs: {len(url_bias_map)}")
