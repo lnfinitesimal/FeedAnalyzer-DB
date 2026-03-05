@@ -34,14 +34,23 @@ IGNORE_PATHS = {
 
 _DOMAIN_BLACKLIST = {
     "mediabiasfactcheck.com", "twitter.com", "facebook.com",
-    "wikipedia.org", "patreon.com", "x.com", "instagram.com",
+    "patreon.com", "x.com", "instagram.com",
     "youtube.com", "linkedin.com", "reddit.com", "tiktok.com",
     "threads.net", "archive.org", "archive.is", "archive.ph",
+    "wp.com", "wordpress.com", "gravatar.com",
+    "goo.gl", "bit.ly", "tinyurl.com", "amzn.to",
+    "apple.com", "play.google.com", "apps.apple.com",
 }
 
 VALID_FACTUALITY  = {"VERY HIGH", "HIGH", "MOSTLY FACTUAL", "MIXED", "LOW", "VERY LOW"}
 VALID_CREDIBILITY = {"HIGH CREDIBILITY", "MEDIUM CREDIBILITY", "LOW CREDIBILITY"}
-VALID_FREEDOM     = {"FREE", "MOSTLY FREE", "PARTLY FREE", "NOT FREE", "EXCELLENT"}
+VALID_FREEDOM     = {
+    "EXCELLENT FREEDOM", "EXCELLENT",
+    "MOSTLY FREE",
+    "MODERATE FREEDOM",
+    "LIMITED FREEDOM",
+    "TOTAL OPPRESSION",
+}
 
 COUNTRY_NORMALIZE = {
     "REPUBLIC OF KOREA": "South Korea",
@@ -54,6 +63,17 @@ COUNTRY_NORMALIZE = {
     "REPUBLIC OF CHINA": "Taiwan",
 }
 
+COUNTRY_DISCARD = {"UNKNOWN", "N/A", "NA", "NONE", "TBD", "VARIOUS", "MULTIPLE"}
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+def _is_blacklisted(dom):
+    if not dom:
+        return True
+    for bl in _DOMAIN_BLACKLIST:
+        if dom == bl or dom.endswith("." + bl):
+            return True
+    return False
+
 # ── HTTP Client ─────────────────────────────────────────────────────────────
 class HTTPClient:
     def __init__(self):
@@ -63,7 +83,7 @@ class HTTPClient:
         self._next_rest = random.randint(30, 40)
 
     def get(self, url, *, kind="page"):
-        base = random.uniform(20, 25) if kind == "listing" else random.uniform(14, 18)
+        base = random.uniform(12, 16) if kind == "listing" else random.uniform(6, 10)
         time.sleep(base)
 
         if self.request_count > 0 and self.request_count >= self._next_rest:
@@ -91,15 +111,13 @@ class HTTPClient:
                 print(f"  [!] HTTP {res.status_code} — waiting {wait:.0f}s (streak: {self.consecutive_429s})")
                 time.sleep(wait)
 
-                # One immediate retry after cooldown
                 res2 = self.session.get(url, timeout=30, headers=headers)
                 self.request_count += 1
                 if res2.status_code == 200:
                     self.consecutive_429s = 0
                     return res2
 
-                # Second 429 in a row on same URL — skip it, move on
-                print(f"  [!] Retry failed — skipping this URL")
+                print(f"  [!] Retry failed — skipping")
                 return None
 
             return None
@@ -199,7 +217,9 @@ def scrape_metrics(soup):
 
     if metrics["o"]:
         wu = metrics["o"].upper()
-        if re.search(r'\b(US|USA|UNITED STATES|UNITED STATES OF AMERICA)\b', wu) or re.search(r'(?<!\w)U\.S\.A?\.?(?!\w)', wu):
+        if wu in COUNTRY_DISCARD:
+            metrics["o"] = None
+        elif re.search(r'\b(US|USA|UNITED STATES|UNITED STATES OF AMERICA)\b', wu) or re.search(r'(?<!\w)U\.S\.A?\.?(?!\w)', wu):
             metrics["o"] = "USA"
         elif re.search(r'\b(UK|UNITED KINGDOM|GREAT BRITAIN)\b', wu) or re.search(r'(?<!\w)U\.K\.?(?!\w)', wu):
             metrics["o"] = "UK"
@@ -210,6 +230,7 @@ def scrape_metrics(soup):
     return {k: v for k, v in metrics.items() if v}
 
 def extract_source_domain(soup):
+    """Extract source domain from 'Source:' text ONLY. No fallback."""
     content = soup.find("div", class_="entry-content")
     if not content:
         return None
@@ -217,13 +238,8 @@ def extract_source_domain(soup):
         link = tag.parent.find_next("a")
         if link and link.get("href"):
             dom = root_domain(link["href"])
-            if dom and dom not in _DOMAIN_BLACKLIST and len(dom) > 3:
+            if dom and not _is_blacklisted(dom) and len(dom) > 3:
                 return dom
-    for a in content.find_all("a", href=True, limit=5):
-        dom = root_domain(a["href"])
-        if dom and dom not in _DOMAIN_BLACKLIST and len(dom) > 3:
-            print(f"    [⚠] Fallback domain: {dom}")
-            return dom
     return None
 
 # ── Database ────────────────────────────────────────────────────────────────
@@ -256,7 +272,7 @@ def save_database(db):
         fact_ct[entry.get("f", "Unrated")] = fact_ct.get(entry.get("f", "Unrated"), 0) + 1
         cred_ct[entry.get("c", "Unrated")] = cred_ct.get(entry.get("c", "Unrated"), 0) + 1
         free_ct[entry.get("p", "Unrated")] = free_ct.get(entry.get("p", "Unrated"), 0) + 1
-        country_ct[entry.get("o", "Unknown")] = country_ct.get(entry.get("o", "Unknown"), 0) + 1
+        country_ct[entry.get("o", "Unrated")] = country_ct.get(entry.get("o", "Unrated"), 0) + 1
 
     md = f"# 📊 Feed Ratings Statistics\n\n**Total Sources:** `{valid}`\n\n"
 
