@@ -29,7 +29,8 @@ IGNORE_PATHS = {
     "terms-and-conditions", "faq", "badges", "membership-account",
     "filter-options", "submit-fact-check", "daily-source-bias-check",
     "podcast", "search", "cookie-policy", "staff-and-writers",
-    "membership", "login", "register", "tag", "category", "author", "page",
+    "membership", "login", "register", "tag", "category", "author", "page", 
+    "support-media-bias-fact-check", "left-vs-right-bias-how-we-rate-the-bias-of-media-sources",
 }
 
 _DOMAIN_BLACKLIST = {
