@@ -57,19 +57,18 @@ COUNTRY_NORMALIZE = {
 # ── HTTP Client ─────────────────────────────────────────────────────────────
 class HTTPClient:
     def __init__(self):
-        profile = random.choice(["chrome120", "chrome124"])
-        self.session = requests.Session(impersonate=profile)
+        # Auto-latest Chrome to defeat static fingerprint blocks
+        self.session = requests.Session(impersonate="chrome")
         self.request_count = 0
         self.penalty_multiplier = 1.0
         self.next_rest = random.randint(30, 40)
-        print(f"[*] TLS fingerprint: {profile}")
+        print("[*] TLS fingerprint: Auto-Latest Chrome")
 
     def _delay(self, kind):
         if kind == "listing":
-            base = random.uniform(18, 24)
-        else:
-            # FIX: 14-18s mathematically guarantees we stay under 5 req/min
             base = random.uniform(14, 18)
+        else:
+            base = random.uniform(12, 16)
         time.sleep(base * self.penalty_multiplier)
 
     def get(self, url, *, kind="page", attempts=3):
@@ -83,7 +82,17 @@ class HTTPClient:
                 self.next_rest = self.request_count + random.randint(30, 40)
 
             try:
-                res = self.session.get(url, timeout=20, headers={"Referer": HOMEPAGE})
+                # Realistic Headers & Google Referer Bypass for Warmup
+                headers = {
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+                }
+                if url != HOMEPAGE:
+                    headers["Referer"] = HOMEPAGE
+                else:
+                    headers["Referer"] = "https://www.google.com/"
+
+                res = self.session.get(url, timeout=20, headers=headers)
                 self.request_count += 1
 
                 if res.status_code == 200:
@@ -219,7 +228,6 @@ def load_database():
     return {}
 
 def save_database(db):
-    # 1. Atomic write for JSON
     fd, tmp_path = tempfile.mkstemp(dir=".", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -229,7 +237,6 @@ def save_database(db):
         os.unlink(tmp_path)
         raise
     
-    # Generate MD Stats
     bias_counts, fact_counts = {}, {}
     valid_entries = 0
     for key, entry in db.items():
@@ -246,7 +253,6 @@ def save_database(db):
     md += "\n### ✅ Factuality Distribution\n| Factuality Rating | Count |\n| :--- | :--- |\n"
     for k, v in sorted(fact_counts.items(), key=lambda x: x[1], reverse=True): md += f"| {k} | **{v}** |\n"
     
-    # FIX: Atomic write for Markdown too
     fd2, tmp_md = tempfile.mkstemp(dir=".", suffix=".tmp")
     try:
         with os.fdopen(fd2, "w", encoding="utf-8") as f:
@@ -262,7 +268,6 @@ def harvest_urls(db):
     endpoints = list(TARGET_ENDPOINTS.keys())
     random.shuffle(endpoints)
 
-    # FIX: Bootstrap Mode. If DB is empty, harvest ALL categories to build the index immediately.
     if not db:
         print("[*] Bootstrap mode: DB is empty. Harvesting ALL categories to build index.")
         endpoints_to_check = endpoints
@@ -334,7 +339,6 @@ def process_sources(db, url_bias_map):
 
     for i, url in enumerate(todo_urls, 1):
         
-        # FIX: Circuit Breaker! Abort gracefully if Cloudflare puts us in timeout jail.
         if http.penalty_multiplier >= 2.5:
             print(f"\n[!] Circuit breaker tripped at {i}/{total}. Cloudflare is too aggressive. Saving and exiting gracefully.")
             break
@@ -390,7 +394,6 @@ def main():
 
     if not http.warmup(): return
 
-    # FIX: Pass the DB to harvest_urls so it can check if we need to Bootstrap
     url_bias_map = harvest_urls(db)
     if not url_bias_map: return
     
