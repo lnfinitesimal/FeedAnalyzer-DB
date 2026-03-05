@@ -1,0 +1,32 @@
+name: DB Intel Automation
+
+on:
+  schedule:
+    - cron: '0 2 * * 0' # Runs once a week (Sundays 02:00 UTC)
+  workflow_dispatch:    # Allows manual runs from your phone
+
+jobs:
+  compile-intel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Intel Compiler
+        run: python intel_compiler.py
+
+      - name: Commit Database
+        run: |
+          git config --global user.name "Analyzer-Bot"
+          git config --global user.email "bot@feedanalyzer.local"
+          git add feed_intelligence.json
+          git commit -m "Automated Intel DB update" || exit 0
+          git push
