@@ -15,7 +15,7 @@ permissions:
 jobs:
   compile-intel:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -34,6 +34,7 @@ jobs:
         run: python -u intel_compiler.py
 
       - name: Commit Database
+        if: always()
         run: |
           git config --global user.name "Analyzer-Bot"
           git config --global user.email "bot@feedanalyzer.local"
