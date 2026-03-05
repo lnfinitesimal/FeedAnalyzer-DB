@@ -109,17 +109,16 @@ class HTTPClient:
 
             if res.status_code in (429, 403, 503):
                 self.consecutive_429s += 1
-                wait = random.uniform(90, 120)
-                print(f"  [!] HTTP {res.status_code} — waiting {wait:.0f}s (streak: {self.consecutive_429s})")
-                time.sleep(wait)
-
-                res2 = self.session.get(url, timeout=30, headers=headers)
-                self.request_count += 1
-                if res2.status_code == 200:
-                    self.consecutive_429s = 0
-                    return res2
-
-                print(f"  [!] Retry failed — skipping")
+                for retry_num, wait_range in enumerate([(90, 120), (120, 180)], 1):
+                    wait = random.uniform(*wait_range)
+                    print(f"  [!] HTTP {res.status_code} — retry {retry_num}/2 after {wait:.0f}s (streak: {self.consecutive_429s})")
+                    time.sleep(wait)
+                    res2 = self.session.get(url, timeout=30, headers=headers)
+                    self.request_count += 1
+                    if res2.status_code == 200:
+                        self.consecutive_429s = 0
+                        return res2
+                print(f"  [!] Both retries failed — skipping")
                 return None
 
             return None
@@ -232,22 +231,31 @@ def scrape_metrics(soup):
     return {k: v for k, v in metrics.items() if v}
 
 def extract_source_domain(soup):
-    """Extract source domain — link first, then (dot) pattern."""
+    """Extract source domain — searches parent element text, not individual text nodes."""
     content = soup.find("div", class_="entry-content")
     if not content:
         return None
 
-    # Primary: find "Source:" followed by a clickable link
-    for tag in content.find_all(string=re.compile(r"Sources?\s*(?:URL)?\s*:", re.I)):
-        link = tag.parent.find_next("a")
-        if link and link.get("href"):
+    for p in content.find_all(["p", "div", "li"]):
+        p_text = p.get_text(strip=True)
+        if not re.search(r"Sources?\s*(?:URL)?\s*:", p_text, re.I):
+            continue
+
+        # Clickable link inside this element
+        for link in p.find_all("a", href=True):
             dom = root_domain(link["href"])
             if dom and not _is_blacklisted(dom) and len(dom) > 3:
                 return dom
 
-        # Secondary: "Source: example (dot) com" as plain text
-        parent_text = tag.parent.get_text(strip=True)
-        m = re.search(r"Sources?\s*(?:URL)?\s*:\s*(.+)", parent_text, re.I)
+        # Plain URL in text
+        url_match = re.search(r"https?://([a-z0-9]([a-z0-9\-]*\.)+[a-z]{2,})", p_text, re.I)
+        if url_match:
+            dom = url_match.group(1).replace("www.", "").lower()
+            if not _is_blacklisted(dom) and len(dom) > 3:
+                return dom
+
+        # Obfuscated: "example (dot) com"
+        m = re.search(r"Sources?\s*(?:URL)?\s*:\s*(.+)", p_text, re.I)
         if m:
             raw = m.group(1).strip()
             dotted = re.sub(r"\s*\(dot\)\s*", ".", raw, flags=re.I).lower().strip(" ./")
