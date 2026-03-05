@@ -8,7 +8,7 @@ DB_FILE    = "ratings.json"
 MD_FILE    = "statistics.md"
 HOMEPAGE   = "https://mediabiasfactcheck.com/"
 RECHECK    = 7 * 86400  # 7 days
-MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", 400))
+MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", 250))
 
 TARGET_ENDPOINTS = {
     "https://mediabiasfactcheck.com/left/": "Left",
@@ -65,10 +65,11 @@ class HTTPClient:
         print(f"[*] TLS fingerprint: {profile}")
 
     def _delay(self, kind):
+        # FIX: Slower delays to prevent Cloudflare 429 Datacenter bans
         if kind == "listing":
             base = random.uniform(18, 24)
         else:
-            base = random.uniform(8,11)
+            base = random.uniform(8, 11)
         time.sleep(base * self.penalty_multiplier)
 
     def get(self, url, *, kind="page", attempts=3):
@@ -77,7 +78,7 @@ class HTTPClient:
             
             if self.request_count > 0 and self.request_count >= self.next_rest:
                 rest = random.uniform(45, 75)
-                print(f"[zZz] Organic rest break for {rest:.1f}s...")
+                print(f"  [zZz] Organic rest break for {rest:.1f}s...")
                 time.sleep(rest)
                 self.next_rest = self.request_count + random.randint(40, 50)
 
@@ -128,7 +129,6 @@ def truncate_dom(soup):
     raw_content = soup.find("div", class_="entry-content")
     if not raw_content: return None
 
-    # FIX: Parse a detached copy to prevent destroying the original DOM structure for other functions
     content = BeautifulSoup(str(raw_content), "html.parser")
 
     for tag in content.find_all(["h2", "h3", "h4", "h5"]):
@@ -296,7 +296,6 @@ def process_sources(db, url_bias_map):
         known_domain = url_to_domain.get(mbfc_url)
         return db[known_domain].get("chk", 0) if known_domain else 0
     
-    # FIX: Exclude permanently dead URLs from entering the queue and wasting slots
     todo_urls =[u for u in url_bias_map.keys() 
                  if last_checked(u) <= now - RECHECK 
                  and db.get(f"_fail:{u}", {}).get("fails", 0) < 3]
@@ -341,20 +340,21 @@ def process_sources(db, url_bias_map):
         entry = {"u": url, "chk": now, "b": url_bias_map[url]}
         entry.update(met)
 
+        # FIX: Explicitly print all 5 values to the terminal so you can see them!
         if domain in db:
             old = db[domain]
             data_changed = any(old.get(k) != entry.get(k) for k in ("b", "f", "c", "p", "o"))
             if data_changed:
                 db[domain] = entry
                 updated_count += 1
-                print(f"[{i}/{total}] [~] UPDATED: {domain} | {entry.get('b')} | {entry.get('f', 'N/A')}")
+                print(f"[{i}/{total}] [~] UPDATED: {domain} | B: {entry.get('b')} | F: {entry.get('f')} | C: {entry.get('c')} | P: {entry.get('p')} | O: {entry.get('o')}")
             else:
                 db[domain]["chk"] = now 
                 print(f"[{i}/{total}] [-] {domain} (Unchanged)")
         else:
             db[domain] = entry
             new_count += 1
-            print(f"[{i}/{total}] [+] NEW: {domain} | {entry.get('b')} | {entry.get('f', 'N/A')}")
+            print(f"[{i}/{total}] [+] NEW: {domain} | B: {entry.get('b')} | F: {entry.get('f')} | C: {entry.get('c')} | P: {entry.get('p')} | O: {entry.get('o')}")
 
         if i % 25 == 0: save_database(db)
 
