@@ -2,7 +2,7 @@ name: DB Intel Automation
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 2 * * *'  # Runs once daily to save GitHub Action minutes!
   workflow_dispatch:
 
 concurrency:
@@ -30,7 +30,7 @@ jobs:
 
       - name: Run Intel Compiler
         env:
-          MAX_PER_RUN: 250  # Reduced to 250 to allow slower, safer scraping
+          MAX_PER_RUN: 150  # 150 max to ensure it fits in ~45 minutes
         run: python -u intel_compiler.py
 
       - name: Commit Database
