@@ -30,7 +30,7 @@ jobs:
 
       - name: Run Intel Compiler
         env:
-          MAX_PER_RUN: 200
+          MAX_PER_RUN: 150
         run: python -u intel_compiler.py
 
       - name: Commit Database
