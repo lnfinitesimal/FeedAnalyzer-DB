@@ -26,7 +26,7 @@ jobs:
           python-version: '3.10'
 
       - name: Install Dependencies
-        run: pip install beautifulsoup4 curl_cffi
+        run: pip install beautifulsoup4 curl_cffi tldextract pycountry
 
       - name: Run Intel Compiler
         run: python -u intel_compiler.py
@@ -45,11 +45,3 @@ jobs:
             git pull --rebase origin main
             git push
           fi
-
-      - name: Trigger next run
-        if: success()
-        run: |
-          sleep 120
-          gh workflow run "DB Intel Automation"
-        env:
-          GH_TOKEN: ${{ github.token }}
