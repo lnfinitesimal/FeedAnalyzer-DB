@@ -1,38 +1,37 @@
 # 📊 Feed Ratings Statistics
 
-**Total Sources:** `1356`
+**Total Sources:** `1358`
 
 ### ⚖️ Bias Distribution
-| Bias Category | Count |
+| Category | Count |
 | :--- | :--- |
-| Right | **454** |
-| Left | **437** |
-| Right-Center | **209** |
-| Left-Center | **177** |
-| Satire | **78** |
-| Pro-Science | **1** |
+| Right | **458** |
+| Left | **440** |
+| Right-Center | **207** |
+| Left-Center | **174** |
+| Satire | **79** |
 
 ### ✅ Factuality Distribution
-| Factuality Rating | Count |
+| Category | Count |
 | :--- | :--- |
-| Mixed | **536** |
+| Mixed | **537** |
 | High | **451** |
 | Mostly Factual | **290** |
-| Unrated | **76** |
+| Unrated | **77** |
 | Low | **3** |
 
 ### 🛡️ Credibility Distribution
-| Credibility Rating | Count |
+| Category | Count |
 | :--- | :--- |
-| Medium Credibility | **666** |
+| Medium Credibility | **667** |
 | High Credibility | **575** |
-| Unrated | **110** |
+| Unrated | **111** |
 | Low Credibility | **5** |
 
 ### 🗽 Press Freedom Distribution
-| Freedom Rating | Count |
+| Category | Count |
 | :--- | :--- |
-| Mostly Free | **1160** |
+| Mostly Free | **1162** |
 | Unrated | **122** |
 | Moderate Freedom | **48** |
 | Limited Freedom | **17** |
@@ -42,13 +41,13 @@
 ### 🌍 Country Distribution (Top 30)
 | Country | Count |
 | :--- | :--- |
-| USA | **1030** |
+| USA | **1031** |
 | Canada | **80** |
 | UK | **59** |
 | Australia | **28** |
 | India | **19** |
 | Israel | **16** |
-| Germany | **14** |
+| Germany | **15** |
 | France | **11** |
 | Unknown | **9** |
 | Netherlands | **8** |
