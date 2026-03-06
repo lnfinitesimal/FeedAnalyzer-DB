@@ -2,7 +2,7 @@ name: DB Intel Automation
 
 on:
   schedule:
-    - cron: '0 */2 * * *'
+    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -15,7 +15,7 @@ permissions:
 jobs:
   compile-intel:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 340
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -29,8 +29,6 @@ jobs:
         run: pip install beautifulsoup4 curl_cffi
 
       - name: Run Intel Compiler
-        env:
-          MAX_PER_RUN: 150
         run: python -u intel_compiler.py
 
       - name: Commit Database
@@ -47,3 +45,11 @@ jobs:
             git pull --rebase origin main
             git push
           fi
+
+      - name: Trigger next run
+        if: success()
+        run: |
+          sleep 120
+          gh workflow run "DB Intel Automation"
+        env:
+          GH_TOKEN: ${{ github.token }}
