@@ -1,73 +1,73 @@
 # 📊 Feed Ratings Statistics
 
-**Total Sources:** `713`
+**Total Sources:** `880`
 
 ### ⚖️ Bias Distribution
 | Bias Category | Count |
 | :--- | :--- |
 | Right | **454** |
 | Left-Center | **176** |
+| Right-Center | **170** |
 | Satire | **79** |
-| Right-Center | **3** |
 | Pro-Science | **1** |
 
 ### ✅ Factuality Distribution
 | Factuality Rating | Count |
 | :--- | :--- |
-| Mixed | **396** |
-| High | **161** |
+| Mixed | **424** |
+| High | **263** |
+| Mostly Factual | **113** |
 | Unrated | **77** |
-| Mostly Factual | **76** |
 | Low | **3** |
 
 ### 🛡️ Credibility Distribution
 | Credibility Rating | Count |
 | :--- | :--- |
-| Medium Credibility | **418** |
-| High Credibility | **193** |
+| Medium Credibility | **459** |
+| High Credibility | **319** |
 | Unrated | **97** |
 | Low Credibility | **5** |
 
 ### 🗽 Press Freedom Distribution
 | Freedom Rating | Count |
 | :--- | :--- |
-| Mostly Free | **599** |
-| Unrated | **73** |
-| Moderate Freedom | **24** |
-| Limited Freedom | **13** |
-| Excellent Freedom | **3** |
-| Total Oppression | **1** |
+| Mostly Free | **730** |
+| Unrated | **92** |
+| Moderate Freedom | **36** |
+| Limited Freedom | **16** |
+| Excellent Freedom | **4** |
+| Total Oppression | **2** |
 
 ### 🌍 Country Distribution (Top 30)
 | Country | Count |
 | :--- | :--- |
-| USA | **540** |
-| Canada | **41** |
-| UK | **32** |
-| Australia | **19** |
-| Israel | **12** |
+| USA | **650** |
+| Canada | **61** |
+| UK | **34** |
+| Australia | **21** |
+| Israel | **14** |
+| India | **14** |
+| Germany | **8** |
 | Unknown | **8** |
 | Turkey | **7** |
-| India | **6** |
-| Germany | **5** |
-| France | **5** |
-| Netherlands | **4** |
+| France | **7** |
+| Netherlands | **5** |
+| Hungary | **3** |
 | Ireland | **3** |
+| Argentina | **3** |
 | Poland | **3** |
 | Italy | **2** |
+| Serbia | **2** |
 | Brazil | **2** |
+| Egypt | **2** |
 | New Zealand | **2** |
-| Hungary | **2** |
 | Austria | **2** |
-| Serbia | **1** |
-| Egypt | **1** |
+| Denmark | **2** |
+| South Africa | **2** |
 | Greece | **1** |
 | Iraq | **1** |
-| Argentina | **1** |
 | Bulgaria | **1** |
 | Slovenia | **1** |
 | Malaysia | **1** |
 | Switzerland | **1** |
 | Romania | **1** |
-| Indonesia | **1** |
-| Sri Lanka | **1** |
