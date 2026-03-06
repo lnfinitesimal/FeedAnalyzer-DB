@@ -8,7 +8,8 @@ DB_FILE     = "ratings.json"
 MD_FILE     = "statistics.md"
 HOMEPAGE    = "https://mediabiasfactcheck.com/"
 RECHECK     = 30 * 86400
-MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", 150))
+MAX_RUNTIME = 310 * 60  # 310 minutes — exit 30 min before GitHub's 340 min timeout
+START_TIME  = time.time()
 
 TARGET_ENDPOINTS = {
     "https://mediabiasfactcheck.com/left/": "Left",
@@ -42,6 +43,7 @@ _DOMAIN_BLACKLIST = {
     "wp.com", "wordpress.com", "gravatar.com",
     "goo.gl", "bit.ly", "tinyurl.com", "amzn.to",
     "apple.com", "play.google.com", "apps.apple.com",
+    "domaintools.com", "wikipedia.org",
 }
 
 VALID_FACTUALITY  = {"VERY HIGH", "HIGH", "MOSTLY FACTUAL", "MIXED", "LOW", "VERY LOW"}
@@ -75,6 +77,9 @@ def _is_blacklisted(dom):
         if dom == bl or dom.endswith("." + bl):
             return True
     return False
+
+def time_remaining():
+    return MAX_RUNTIME - (time.time() - START_TIME)
 
 # ── HTTP Client ─────────────────────────────────────────────────────────────
 class HTTPClient:
@@ -231,30 +236,30 @@ def scrape_metrics(soup):
     return {k: v for k, v in metrics.items() if v}
 
 def extract_source_domain(soup):
-    """Extract source domain — searches parent element text, not individual text nodes."""
+    """Extract source domain from short 'Source:' metadata lines only."""
     content = soup.find("div", class_="entry-content")
     if not content:
         return None
 
     for p in content.find_all(["p", "div", "li"]):
         p_text = p.get_text(strip=True)
-        if not re.search(r"Sources?\s*(?:URL)?\s*:", p_text, re.I):
+
+        if len(p_text) > 300:
+            continue
+        if not re.match(r"Sources?\s*(?:URL)?\s*:", p_text, re.I):
             continue
 
-        # Clickable link inside this element
         for link in p.find_all("a", href=True):
             dom = root_domain(link["href"])
             if dom and not _is_blacklisted(dom) and len(dom) > 3:
                 return dom
 
-        # Plain URL in text
         url_match = re.search(r"https?://([a-z0-9]([a-z0-9\-]*\.)+[a-z]{2,})", p_text, re.I)
         if url_match:
             dom = url_match.group(1).replace("www.", "").lower()
             if not _is_blacklisted(dom) and len(dom) > 3:
                 return dom
 
-        # Obfuscated: "example (dot) com"
         m = re.search(r"Sources?\s*(?:URL)?\s*:\s*(.+)", p_text, re.I)
         if m:
             raw = m.group(1).strip()
@@ -295,7 +300,7 @@ def save_database(db):
         fact_ct[entry.get("f", "Unrated")] = fact_ct.get(entry.get("f", "Unrated"), 0) + 1
         cred_ct[entry.get("c", "Unrated")] = cred_ct.get(entry.get("c", "Unrated"), 0) + 1
         free_ct[entry.get("p", "Unrated")] = free_ct.get(entry.get("p", "Unrated"), 0) + 1
-        country_ct[entry.get("o", "Unrated")] = country_ct.get(entry.get("o", "Unrated"), 0) + 1
+        country_ct[entry.get("o", "Unknown")] = country_ct.get(entry.get("o", "Unknown"), 0) + 1
 
     md = f"# 📊 Feed Ratings Statistics\n\n**Total Sources:** `{valid}`\n\n"
 
@@ -335,8 +340,8 @@ def harvest_urls(db):
     endpoints = list(TARGET_ENDPOINTS.keys())
     random.shuffle(endpoints)
 
-    if not db:
-        print("[*] Bootstrap mode — harvesting all categories")
+    if not db or len(db) < 500:
+        print("[*] Recovery mode — harvesting all categories")
         to_check = endpoints
     else:
         to_check = endpoints[:3]
@@ -407,8 +412,10 @@ def process_sources(db, url_bias_map):
         filtered.append(u)
     todo = filtered
 
-    if MAX_PER_RUN:
-        todo = todo[:MAX_PER_RUN]
+    # Harvest summary
+    new_urls = sum(1 for u in todo if u not in url_to_domain)
+    update_urls = len(todo) - new_urls
+    print(f"\n  [*] Queue: {new_urls} new + {update_urls} updates = {len(todo)} total")
 
     total = len(todo)
     print(f"\n=== PHASE 2 · PROCESSING {total} SOURCES ({len(url_bias_map) - total} skipped) ===")
@@ -423,6 +430,10 @@ def process_sources(db, url_bias_map):
             print(f"\n  [!] Circuit breaker at {i - 1}/{total} — saving progress")
             break
 
+        if time_remaining() < 300:
+            print(f"\n  [!] Time limit approaching ({time_remaining() / 60:.0f} min left) — saving progress at {i - 1}/{total}")
+            break
+
         res = http.get(url)
         if not res:
             if not http.should_stop:
@@ -430,7 +441,9 @@ def process_sources(db, url_bias_map):
             continue
 
         soup = BeautifulSoup(res.text, "html.parser")
-        domain = extract_source_domain(soup)
+
+        known_domain = url_to_domain.get(url)
+        domain = known_domain if known_domain else extract_source_domain(soup)
 
         fail_key = f"_fail:{url}"
         if not domain:
@@ -499,7 +512,8 @@ def main():
 
     save_database(db)
     valid = sum(1 for k in db if not k.startswith("_fail:"))
-    print(f"\n  [✓] Done — {valid} sources | +{new_ct} new | ~{upd_ct} updated | {http.request_count} requests")
+    elapsed = (time.time() - START_TIME) / 60
+    print(f"\n  [✓] Done in {elapsed:.0f} min — {valid} sources | +{new_ct} new | ~{upd_ct} updated | {http.request_count} requests")
 
 if __name__ == "__main__":
     main()
