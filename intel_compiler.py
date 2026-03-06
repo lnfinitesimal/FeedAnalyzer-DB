@@ -7,20 +7,20 @@ from urllib.parse import urlparse
 DB_FILE     = "ratings.json"
 MD_FILE     = "statistics.md"
 HOMEPAGE    = "https://mediabiasfactcheck.com/"
-RECHECK     = 30 * 86400
-MAX_RUNTIME = 310 * 60  # 310 minutes — exit 30 min before GitHub's 340 min timeout
+RECHECK     = 14 * 86400
+MAX_RUNTIME = 310 * 60
 START_TIME  = time.time()
 
 TARGET_ENDPOINTS = {
-    "https://mediabiasfactcheck.com/left/": "Left",
-    "https://mediabiasfactcheck.com/leftcenter/": "Left-Center",
-    "https://mediabiasfactcheck.com/center/": "Least Biased",
+    "https://mediabiasfactcheck.com/left/":         "Left",
+    "https://mediabiasfactcheck.com/leftcenter/":   "Left-Center",
+    "https://mediabiasfactcheck.com/center/":       "Least Biased",
     "https://mediabiasfactcheck.com/right-center/": "Right-Center",
-    "https://mediabiasfactcheck.com/right/": "Right",
-    "https://mediabiasfactcheck.com/pro-science/": "Pro-Science",
-    "https://mediabiasfactcheck.com/fake-news/": "Questionable",
-    "https://mediabiasfactcheck.com/conspiracy/": "Conspiracy",
-    "https://mediabiasfactcheck.com/satire/": "Satire",
+    "https://mediabiasfactcheck.com/right/":        "Right",
+    "https://mediabiasfactcheck.com/pro-science/":  "Pro-Science",
+    "https://mediabiasfactcheck.com/fake-news/":    "Questionable",
+    "https://mediabiasfactcheck.com/conspiracy/":   "Conspiracy",
+    "https://mediabiasfactcheck.com/satire/":       "Satire",
 }
 
 TARGET_SLUGS = {urlparse(u).path.strip("/") for u in TARGET_ENDPOINTS}
@@ -49,11 +49,8 @@ _DOMAIN_BLACKLIST = {
 VALID_FACTUALITY  = {"VERY HIGH", "HIGH", "MOSTLY FACTUAL", "MIXED", "LOW", "VERY LOW"}
 VALID_CREDIBILITY = {"HIGH CREDIBILITY", "MEDIUM CREDIBILITY", "LOW CREDIBILITY"}
 VALID_FREEDOM     = {
-    "EXCELLENT FREEDOM",
-    "MOSTLY FREE",
-    "MODERATE FREEDOM",
-    "LIMITED FREEDOM",
-    "TOTAL OPPRESSION",
+    "EXCELLENT FREEDOM", "MOSTLY FREE", "MODERATE FREEDOM",
+    "LIMITED FREEDOM", "TOTAL OPPRESSION",
 }
 
 COUNTRY_NORMALIZE = {
@@ -81,6 +78,33 @@ def _is_blacklisted(dom):
 def time_remaining():
     return MAX_RUNTIME - (time.time() - START_TIME)
 
+def source_key_from_url(url_str):
+    """
+    Extract a source key that preserves meaningful paths.
+    350.org         → 350.org
+    350.org/fr/     → 350.org/fr
+    350.org/pacific → 350.org/pacific
+    nytimes.com/    → nytimes.com
+    """
+    try:
+        p = urlparse(url_str)
+        dom = p.netloc.replace("www.", "").lower()
+        if not dom:
+            return None
+        path = p.path.strip("/")
+        # Discard generic paths like index.html, home, etc.
+        if path and path not in ("index.html", "index.php", "home", "en", ""):
+            return f"{dom}/{path}"
+        return dom
+    except Exception:
+        return None
+
+def root_domain(url_str):
+    try:
+        return urlparse(url_str).netloc.replace("www.", "").lower()
+    except Exception:
+        return None
+
 # ── HTTP Client ─────────────────────────────────────────────────────────────
 class HTTPClient:
     def __init__(self):
@@ -88,8 +112,16 @@ class HTTPClient:
         self.request_count = 0
         self.consecutive_429s = 0
         self._next_rest = random.randint(30, 40)
+        self._backoff_until = 0
 
     def get(self, url, *, kind="page"):
+        # Respect global backoff from previous failures
+        now = time.time()
+        if now < self._backoff_until:
+            wait = self._backoff_until - now
+            print(f"  [⏳] Global backoff {wait:.0f}s")
+            time.sleep(wait)
+
         base = random.uniform(16, 20) if kind == "listing" else random.uniform(12, 14)
         time.sleep(base)
 
@@ -99,37 +131,47 @@ class HTTPClient:
             time.sleep(rest)
             self._next_rest = self.request_count + random.randint(30, 40)
 
-        try:
-            headers = {
-                "Referer": "https://www.google.com/" if url == HOMEPAGE else HOMEPAGE,
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            }
-            res = self.session.get(url, timeout=30, headers=headers)
-            self.request_count += 1
+        headers = {
+            "Referer": "https://www.google.com/" if url == HOMEPAGE else HOMEPAGE,
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+
+        for attempt in range(1, 4):
+            try:
+                res = self.session.get(url, timeout=30, headers=headers)
+                self.request_count += 1
+            except Exception as exc:
+                print(f"  [!] Network error (attempt {attempt}/3): {exc}")
+                if attempt < 3:
+                    time.sleep(random.uniform(60, 90))
+                    continue
+                self.consecutive_429s += 1
+                return None
 
             if res.status_code == 200:
                 self.consecutive_429s = 0
                 return res
 
             if res.status_code in (429, 403, 503):
-                self.consecutive_429s += 1
-                for retry_num, wait_range in enumerate([(90, 120), (120, 180)], 1):
-                    wait = random.uniform(*wait_range)
-                    print(f"  [!] HTTP {res.status_code} — retry {retry_num}/2 after {wait:.0f}s (streak: {self.consecutive_429s})")
+                if attempt < 3:
+                    wait = random.uniform(90, 120) if attempt == 1 else random.uniform(120, 180)
+                    print(f"  [!] HTTP {res.status_code} — attempt {attempt}/3, waiting {wait:.0f}s (streak: {self.consecutive_429s})")
                     time.sleep(wait)
-                    res2 = self.session.get(url, timeout=30, headers=headers)
-                    self.request_count += 1
-                    if res2.status_code == 200:
-                        self.consecutive_429s = 0
-                        return res2
-                print(f"  [!] Both retries failed — skipping")
+                    if res.status_code in (403, 503):
+                        self.session = requests.Session(impersonate="chrome")
+                    continue
+                # All 3 attempts failed
+                self.consecutive_429s += 1
+                self._backoff_until = time.time() + random.uniform(180, 240)
+                print(f"  [!] HTTP {res.status_code} — all 3 attempts failed, backoff {self._backoff_until - time.time():.0f}s (streak: {self.consecutive_429s})")
                 return None
 
+            # Other errors (404, 500, etc.) — no retry
+            print(f"  [!] HTTP {res.status_code} — {url}")
             return None
-        except Exception as exc:
-            print(f"  [!] Network error: {exc}")
-            return None
+
+        return None
 
     @property
     def should_stop(self):
@@ -140,17 +182,12 @@ class HTTPClient:
         if self.get(HOMEPAGE, kind="listing"):
             print("[✓] Session ready.\n")
             return True
+        print("[✗] Warmup failed")
         return False
 
 http = HTTPClient()
 
 # ── Extraction ──────────────────────────────────────────────────────────────
-def root_domain(url_str):
-    try:
-        return urlparse(url_str).netloc.replace("www.", "").lower()
-    except Exception:
-        return None
-
 def clean_value(val):
     if not val:
         return None
@@ -158,7 +195,6 @@ def clean_value(val):
     return val.strip(" .-").upper()
 
 def truncate_dom(soup):
-    """For harvest link extraction ONLY."""
     raw = soup.find("div", class_="entry-content")
     if not raw:
         return None
@@ -187,7 +223,6 @@ def extract_metric(text, pattern, whitelist=None):
     return None
 
 def scrape_metrics(soup):
-    """Extract from FULL page content — no truncation."""
     content = soup.find("div", class_="entry-content")
     if not content:
         return {}
@@ -235,38 +270,44 @@ def scrape_metrics(soup):
 
     return {k: v for k, v in metrics.items() if v}
 
-def extract_source_domain(soup):
-    """Extract source domain from short 'Source:' metadata lines only."""
+def extract_source_key(soup):
+    """
+    Extract source key preserving meaningful paths.
+    Returns key like 'nytimes.com' or '350.org/fr' or None.
+    """
     content = soup.find("div", class_="entry-content")
     if not content:
         return None
 
     for p in content.find_all(["p", "div", "li"]):
         p_text = p.get_text(strip=True)
-
         if len(p_text) > 300:
             continue
         if not re.match(r"Sources?\s*(?:URL)?\s*:", p_text, re.I):
             continue
 
+        # Try hyperlinks first
         for link in p.find_all("a", href=True):
-            dom = root_domain(link["href"])
-            if dom and not _is_blacklisted(dom) and len(dom) > 3:
-                return dom
+            key = source_key_from_url(link["href"])
+            if key and not _is_blacklisted(root_domain(link["href"])):
+                return key
 
-        url_match = re.search(r"https?://([a-z0-9]([a-z0-9\-]*\.)+[a-z]{2,})", p_text, re.I)
+        # Try raw URLs in text
+        url_match = re.search(r"https?://[^\s<>\"']+", p_text, re.I)
         if url_match:
-            dom = url_match.group(1).replace("www.", "").lower()
-            if not _is_blacklisted(dom) and len(dom) > 3:
-                return dom
+            key = source_key_from_url(url_match.group(0))
+            if key and not _is_blacklisted(key.split("/")[0]):
+                return key
 
+        # Try (dot) notation
         m = re.search(r"Sources?\s*(?:URL)?\s*:\s*(.+)", p_text, re.I)
         if m:
             raw = m.group(1).strip()
             dotted = re.sub(r"\s*\(dot\)\s*", ".", raw, flags=re.I).lower().strip(" ./")
-            if re.match(r"^[a-z0-9]([a-z0-9\-]*\.)+[a-z]{2,}$", dotted):
-                if not _is_blacklisted(dotted) and len(dotted) > 3:
-                    return dotted
+            if re.match(r"^[a-z0-9]([a-z0-9\-]*\.)+[a-z]{2,}(/[a-z0-9\-/]*)?$", dotted):
+                dom = dotted.split("/")[0]
+                if not _is_blacklisted(dom) and len(dom) > 3:
+                    return dotted.rstrip("/")
 
     return None
 
@@ -335,28 +376,30 @@ def save_database(db):
 
 # ── Pipeline ────────────────────────────────────────────────────────────────
 def harvest_urls(db):
-    print("\n=== PHASE 1 · HARVESTING ===")
+    print("\n=== PHASE 1 · HARVESTING ALL CATEGORIES ===")
     url_bias_map = {}
     endpoints = list(TARGET_ENDPOINTS.keys())
     random.shuffle(endpoints)
 
-    if not db or len(db) < 500:
-        print("[*] Recovery mode — harvesting all categories")
-        to_check = endpoints
-    else:
-        to_check = endpoints[:3]
-
-    for endpoint in to_check:
+    for endpoint in endpoints:
         if http.should_stop:
             print("  [!] Circuit breaker — stopping harvest")
             break
+        if time_remaining() < 600:
+            print("  [!] Time limit — stopping harvest")
+            break
+
         res = http.get(endpoint, kind="listing")
         if not res:
+            print(f"  [✗] Failed: {endpoint}")
             continue
+
         soup = BeautifulSoup(res.text, "html.parser")
         content = truncate_dom(soup) or soup.find("table", id="mbfc-table")
         if not content:
+            print(f"  [✗] No content: {endpoint}")
             continue
+
         bias = TARGET_ENDPOINTS[endpoint]
         count = 0
         for link in content.find_all("a", href=True):
@@ -377,65 +420,57 @@ def harvest_urls(db):
 def process_sources(db, url_bias_map):
     now = int(time.time())
 
-    # Build reverse maps: MBFC URL → domain, domain → MBFC URL
-    url_to_domain = {}
-    domain_to_url = {}
-    for domain, entry in db.items():
-        if domain.startswith("_fail:"):
+    # Build reverse index: MBFC URL → source key (from existing DB)
+    url_to_key = {}
+    key_to_url = {}
+    for key, entry in db.items():
+        if key.startswith("_fail:"):
             continue
         u = entry.get("u")
         if u:
-            url_to_domain[u] = domain
-            domain_to_url[domain] = u
+            url_to_key[u] = key
+            key_to_url[key] = u
+            # Inject known MBFC URLs that might not be in current harvest
             if u not in url_bias_map and "b" in entry:
                 url_bias_map[u] = entry["b"]
 
-    # Skip URLs whose domain is already known and fresh
+    # Skip URLs whose source key is already fresh
     skip_urls = set()
     skipped_fresh = 0
     for u in url_bias_map:
-        d = url_to_domain.get(u)
-        if d and d in db:
-            entry = db[d]
+        k = url_to_key.get(u)
+        if k and k in db:
+            entry = db[k]
             if entry.get("chk", 0) > now - RECHECK:
                 skip_urls.add(u)
                 skipped_fresh += 1
-                # Still update bias if it changed
+                # Free bias update if category changed
                 if url_bias_map[u] != entry.get("b"):
-                    db[d]["b"] = url_bias_map[u]
-                    db[d]["chk"] = now
+                    db[k]["b"] = url_bias_map[u]
+                    db[k]["chk"] = now
 
-    def last_checked(u):
+    # Build queue
+    todo = []
+    for u in url_bias_map:
+        if u in skip_urls:
+            continue
         fk = f"_fail:{u}"
-        if fk in db:
-            return db[fk].get("chk", 0)
-        d = url_to_domain.get(u)
-        return db[d].get("chk", 0) if d else 0
+        if db.get(fk, {}).get("fails", 0) >= 3:
+            continue
+        todo.append(u)
 
-    todo = [
-        u for u in url_bias_map
-        if u not in skip_urls
-        and last_checked(u) <= now - RECHECK
-        and db.get(f"_fail:{u}", {}).get("fails", 0) < 3
-    ]
-    todo.sort(key=last_checked)
+    # Sort: new URLs first (populate), then stale by oldest check
+    def sort_key(u):
+        k = url_to_key.get(u)
+        if not k:
+            return (0, 0)  # New — top priority
+        return (1, db.get(k, {}).get("chk", 0))
 
-    # Deduplicate by known domain BEFORE fetching
-    seen_domains = set()
-    filtered = []
-    for u in todo:
-        known = url_to_domain.get(u)
-        if known:
-            if known in seen_domains:
-                continue
-            seen_domains.add(known)
-        filtered.append(u)
-    todo = filtered
+    todo.sort(key=sort_key)
 
-    # Queue summary
-    new_urls = sum(1 for u in todo if u not in url_to_domain)
+    new_urls = sum(1 for u in todo if u not in url_to_key)
     update_urls = len(todo) - new_urls
-    print(f"\n  [*] Queue: {new_urls} new + {update_urls} updates = {len(todo)} total ({skipped_fresh} fresh, skipped)")
+    print(f"\n  [*] Queue: {new_urls} new + {update_urls} updates = {len(todo)} total ({skipped_fresh} fresh skipped)")
 
     total = len(todo)
     print(f"\n=== PHASE 2 · PROCESSING {total} SOURCES ===")
@@ -443,15 +478,14 @@ def process_sources(db, url_bias_map):
         return 0, 0
 
     new_ct = upd_ct = 0
-    processed_this_run = set()
+    processed_keys = set()
 
     for i, url in enumerate(todo, 1):
         if http.should_stop:
             print(f"\n  [!] Circuit breaker at {i - 1}/{total} — saving progress")
             break
-
         if time_remaining() < 300:
-            print(f"\n  [!] Time limit approaching ({time_remaining() / 60:.0f} min left) — saving progress at {i - 1}/{total}")
+            print(f"\n  [!] Time limit ({time_remaining() / 60:.0f} min left) — saving at {i - 1}/{total}")
             break
 
         res = http.get(url)
@@ -462,16 +496,17 @@ def process_sources(db, url_bias_map):
 
         soup = BeautifulSoup(res.text, "html.parser")
 
-        known_domain = url_to_domain.get(url)
-        domain = known_domain if known_domain else extract_source_domain(soup)
+        # Use known key from DB if available, otherwise extract
+        known_key = url_to_key.get(url)
+        source_key = known_key if known_key else extract_source_key(soup)
 
         fail_key = f"_fail:{url}"
-        if not domain:
+        if not source_key:
             db.setdefault(fail_key, {"chk": 0, "fails": 0})
             db[fail_key]["fails"] += 1
             db[fail_key]["chk"] = now
             tag = "☠" if db[fail_key]["fails"] >= 3 else "?"
-            print(f"  [{i}/{total}] [{tag}] No domain: {url}")
+            print(f"  [{i}/{total}] [{tag}] No source found: {url}")
             if i % 25 == 0:
                 save_database(db)
             continue
@@ -479,29 +514,32 @@ def process_sources(db, url_bias_map):
             if fail_key in db:
                 del db[fail_key]
 
-        if domain in processed_this_run:
-            print(f"  [{i}/{total}] [dup] {domain}")
+        if source_key in processed_keys:
+            print(f"  [{i}/{total}] [dup] {source_key}")
             continue
-        processed_this_run.add(domain)
+        processed_keys.add(source_key)
 
         met = scrape_metrics(soup)
         entry = {"u": url, "chk": now, "b": url_bias_map[url]}
         entry.update(met)
 
-        if domain in db:
-            old = db[domain]
+        if source_key in db:
+            old = db[source_key]
             changed = any(old.get(k) != entry.get(k) for k in ("b", "f", "c", "p", "o"))
             if changed:
-                db[domain] = entry
+                db[source_key] = entry
                 upd_ct += 1
-                print(f"  [{i}/{total}] [~] {domain} | {entry.get('b')} | F:{entry.get('f', '—')} C:{entry.get('c', '—')} P:{entry.get('p', '—')} O:{entry.get('o', '—')}")
+                print(f"  [{i}/{total}] [~] {source_key} | {entry.get('b')} | F:{entry.get('f', '—')} C:{entry.get('c', '—')} P:{entry.get('p', '—')} O:{entry.get('o', '—')}")
             else:
-                db[domain]["chk"] = now
-                print(f"  [{i}/{total}] [-] {domain}")
+                db[source_key]["chk"] = now
+                print(f"  [{i}/{total}] [-] {source_key}")
         else:
-            db[domain] = entry
+            db[source_key] = entry
             new_ct += 1
-            print(f"  [{i}/{total}] [+] {domain} | {entry.get('b')} | F:{entry.get('f', '—')} C:{entry.get('c', '—')} P:{entry.get('p', '—')} O:{entry.get('o', '—')}")
+            # Update index so subsequent URLs mapping to same key get [dup]
+            url_to_key[url] = source_key
+            key_to_url[source_key] = url
+            print(f"  [{i}/{total}] [+] {source_key} | {entry.get('b')} | F:{entry.get('f', '—')} C:{entry.get('c', '—')} P:{entry.get('p', '—')} O:{entry.get('o', '—')}")
 
         if i % 25 == 0:
             save_database(db)
@@ -516,13 +554,16 @@ def main():
         return
 
     url_bias_map = harvest_urls(db)
-    if not url_bias_map or http.should_stop:
-        if http.should_stop:
-            print("[!] Circuit breaker during harvest — saving and exiting")
-            save_database(db)
+    if not url_bias_map:
+        print("[!] No URLs harvested")
+        save_database(db)
+        return
+    if http.should_stop:
+        print("[!] Circuit breaker during harvest — saving and exiting")
+        save_database(db)
         return
 
-    print(f"\n  [*] Harvested: {len(url_bias_map)} URLs")
+    print(f"\n  [*] Harvested: {len(url_bias_map)} URLs across all categories")
 
     cooldown = random.uniform(90, 120)
     print(f"  [*] Inter-phase cooldown: {cooldown:.0f}s")
