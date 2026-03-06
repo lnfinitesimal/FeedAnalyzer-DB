@@ -377,15 +377,33 @@ def harvest_urls(db):
 def process_sources(db, url_bias_map):
     now = int(time.time())
 
+    # Build reverse maps: MBFC URL → domain, domain → MBFC URL
     url_to_domain = {}
+    domain_to_url = {}
     for domain, entry in db.items():
         if domain.startswith("_fail:"):
             continue
         u = entry.get("u")
         if u:
             url_to_domain[u] = domain
+            domain_to_url[domain] = u
             if u not in url_bias_map and "b" in entry:
                 url_bias_map[u] = entry["b"]
+
+    # Skip URLs whose domain is already known and fresh
+    skip_urls = set()
+    skipped_fresh = 0
+    for u in url_bias_map:
+        d = url_to_domain.get(u)
+        if d and d in db:
+            entry = db[d]
+            if entry.get("chk", 0) > now - RECHECK:
+                skip_urls.add(u)
+                skipped_fresh += 1
+                # Still update bias if it changed
+                if url_bias_map[u] != entry.get("b"):
+                    db[d]["b"] = url_bias_map[u]
+                    db[d]["chk"] = now
 
     def last_checked(u):
         fk = f"_fail:{u}"
@@ -396,11 +414,13 @@ def process_sources(db, url_bias_map):
 
     todo = [
         u for u in url_bias_map
-        if last_checked(u) <= now - RECHECK
+        if u not in skip_urls
+        and last_checked(u) <= now - RECHECK
         and db.get(f"_fail:{u}", {}).get("fails", 0) < 3
     ]
     todo.sort(key=last_checked)
 
+    # Deduplicate by known domain BEFORE fetching
     seen_domains = set()
     filtered = []
     for u in todo:
@@ -412,13 +432,13 @@ def process_sources(db, url_bias_map):
         filtered.append(u)
     todo = filtered
 
-    # Harvest summary
+    # Queue summary
     new_urls = sum(1 for u in todo if u not in url_to_domain)
     update_urls = len(todo) - new_urls
-    print(f"\n  [*] Queue: {new_urls} new + {update_urls} updates = {len(todo)} total")
+    print(f"\n  [*] Queue: {new_urls} new + {update_urls} updates = {len(todo)} total ({skipped_fresh} fresh, skipped)")
 
     total = len(todo)
-    print(f"\n=== PHASE 2 · PROCESSING {total} SOURCES ({len(url_bias_map) - total} skipped) ===")
+    print(f"\n=== PHASE 2 · PROCESSING {total} SOURCES ===")
     if not total:
         return 0, 0
 
