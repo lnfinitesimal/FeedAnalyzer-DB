@@ -19,6 +19,7 @@ MAX_RUNTIME_SECONDS = 14400  # 4 hours timeout limit for Actions
 START_TIME = time.time()
 
 global_db = {}
+master_totals = {}  # FIX: Made global so the emergency shutdown handler can access it
 SHUTDOWN_REQUESTED = False
 
 CATEGORIES = {
@@ -51,10 +52,16 @@ def init_files():
             f.write("# MBFC Database Statistics\n\nInitializing...\n")
 
 def request_shutdown(signum, frame):
-    global SHUTDOWN_REQUESTED
+    global SHUTDOWN_REQUESTED, global_db, master_totals
     if not SHUTDOWN_REQUESTED:
-        print(f"\n[!] Cancellation requested. Finishing the current URL gracefully, then saving data...", flush=True)
+        print(f"\n[!] Cancellation requested. Emergency saving data to prevent loss...", flush=True)
         SHUTDOWN_REQUESTED = True
+        # FIX: Instantly save data upon cancellation to beat GitHub's 7.5 second kill timer
+        try:
+            save_db(global_db)
+            generate_statistics(global_db, master_totals)
+        except Exception as e:
+            pass
 
 signal.signal(signal.SIGINT, request_shutdown)
 signal.signal(signal.SIGTERM, request_shutdown)
@@ -288,7 +295,7 @@ def extract_source_data(html_content, review_url):
 
 # --- MASTER APP ROUTING PROCESS ---
 def main():
-    global global_db, SHUTDOWN_REQUESTED
+    global global_db, SHUTDOWN_REQUESTED, master_totals
     init_files()
     session = get_robust_session()
     global_db = load_db()
@@ -418,7 +425,7 @@ def main():
                          time.sleep(cooldown)
 
                 except Exception as e:
-                    print(f"[{idx}/{cat_total}] [X] Network Error: {e}", flush=True)
+                    print(f"[{idx}/{cat_total}][X] Network Error: {e}", flush=True)
 
                 # FIX 2: Moved up to check for shutdown BEFORE sleeping to beat GitHub's Kill Timer
                 if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS): 
