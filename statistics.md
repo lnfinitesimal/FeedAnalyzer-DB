@@ -1,3 +1,0 @@
-# MBFC Database Statistics
-
-Initializing...
