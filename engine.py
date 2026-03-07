@@ -119,11 +119,16 @@ def generate_statistics(db, master_totals=None):
         
         # FIX: Added Emojis and dynamically calculate accurate pending URLs based on Master Total expected
         md += "### 🗂️ Categories Alignment\n| Category | In Database | Pending |\n|---|---|---|\n"
+        sum_db = 0
+        sum_pend = 0
         for cat in CATEGORIES.values():
             db_ct = cat_counts.get(cat, 0)
             total_expected = master_totals.get(cat, 0)
             pend_ct = max(0, total_expected - db_ct)
             md += f"| {cat} | {db_ct} | {pend_ct} |\n"
+            sum_db += db_ct
+            sum_pend += pend_ct
+        md += f"| **Total** | **{sum_db}** | **{sum_pend}** |\n"
             
         def make_table(title, tally_dict, top=10):
             emojis = {
