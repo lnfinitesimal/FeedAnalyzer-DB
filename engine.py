@@ -23,11 +23,11 @@ SHUTDOWN_REQUESTED = False
 CATEGORIES = {
     "https://mediabiasfactcheck.com/left/": "Left",
     "https://mediabiasfactcheck.com/leftcenter/": "Left-Center",
-    "https://mediabiasfactcheck.com/center/": "Center",
+    "https://mediabiasfactcheck.com/center/": "Least-Biased",
     "https://mediabiasfactcheck.com/right-center/": "Right-Center",
     "https://mediabiasfactcheck.com/right/": "Right",
     "https://mediabiasfactcheck.com/pro-science/": "Pro-Science",
-    "https://mediabiasfactcheck.com/fake-news/": "Fake News",
+    "https://mediabiasfactcheck.com/fake-news/": "Questionable",
     "https://mediabiasfactcheck.com/conspiracy/": "Conspiracy",
     "https://mediabiasfactcheck.com/satire/": "Satire"
 }
@@ -245,7 +245,7 @@ def generate_statistics(db):
                 free_tally[fr] = free_tally.get(fr, 0) + 1
 
         md = f"# MBFC Database Statistics\n\n"
-        md += f"**Last Indexed:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+        md += fCentert Indexed:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
         md += f"**Total Valid Sources Indexed:** {total}\n\n"
         
         md += "### Core Category Progress\n| Category | Source Count |\n|---|---|\n"
@@ -321,7 +321,7 @@ def main():
                     pending_tasks[cat_name].append(link)
             
             in_db_for_this_page = len(unique_valid_links_for_this_page) - len(pending_tasks[cat_name])
-            print(f"  -> {cat_name}: {len(unique_valid_links_for_this_page)} Unique Found. {in_db_for_this_page} DB. {len(pending_tasks[cat_name])} New.", flush=True)
+            print(f"  -> {cat_name}: {len(unique_valid_links_for_this_page)} Found. {in_db_for_this_page} DB. {len(pending_tasks[cat_name])} New.", flush=True)
                         
         except Exception as e:
             print(f"[!] Error fetching category {cat_name}: {e}", flush=True)
