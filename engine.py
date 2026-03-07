@@ -9,11 +9,12 @@ import os
 import signal
 import sys
 from datetime import datetime
+import traceback
 
 # --- CONFIGURATION ---
 DB_FILE = 'ratings.json'
 STATS_FILE = 'statistics.md'
-MAX_RUNTIME_SECONDS = 14400  # 4 Hours Timeout safety buffer for 6-hr Github Run Limits
+MAX_RUNTIME_SECONDS = 14400  # 4 hours timeout limit for Actions
 START_TIME = time.time()
 
 global_db = {}
@@ -39,148 +40,165 @@ EXCLUDED_PATHS = {
     'left', 'leftcenter', 'center', 'right-center', 'right', 'pro-science', 'fake-news', 'conspiracy', 'satire'
 }
 
-
-# --- IO FILES ---
+# --- IO / FILE SETUP ---
 def init_files():
-    """Build root assets upon load allowing emergency pushes even if abort command activates quickly."""
     if not os.path.exists(DB_FILE):
         with open(DB_FILE, 'w', encoding='utf-8') as f:
-            json.dump({cat:[] for cat in CATEGORIES.values()}, f)
+            json.dump({cat:[] for cat in CATEGORIES.values()}, f, indent=4, ensure_ascii=False)
     if not os.path.exists(STATS_FILE):
         with open(STATS_FILE, 'w', encoding='utf-8') as f:
             f.write("# MBFC Database Statistics\n\nInitializing...\n")
 
-
-# --- SAFEST CANCEL FLAG ARCHITECTURE ---
 def request_shutdown(signum, frame):
-    """Graceful cancel mechanism. Stops new requests safely completing currently running targets."""
     global SHUTDOWN_REQUESTED
     if not SHUTDOWN_REQUESTED:
-        print(f"\n[!] Manual stop detected (Signal {signum}). Completing current trace safely before saving DB.", flush=True)
+        print(f"\n[!] Cancellation requested. Finishing the current URL gracefully, then saving data...", flush=True)
         SHUTDOWN_REQUESTED = True
 
 signal.signal(signal.SIGINT, request_shutdown)
 signal.signal(signal.SIGTERM, request_shutdown)
 
-
-# --- NETWORK LOGIC ---
 def get_robust_session():
-    """Generates continuous robust requests avoiding temporary server IP halts."""
     session = requests.Session()
     retries = Retry(total=10, backoff_factor=3, status_forcelist=[429, 500, 502, 503, 504])
     session.mount('http://', HTTPAdapter(max_retries=retries))
     session.mount('https://', HTTPAdapter(max_retries=retries))
-    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
     return session
 
-
-# --- DICTIONARY I/O HELPERS ---
 def load_db():
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                # Structure integrity check maintaining arrays universally across changes
                 for req_cat in CATEGORIES.values():
-                     if req_cat not in data: data[req_cat] =[]
+                    if req_cat not in data:
+                        data[req_cat] =[]
                 return data
         except json.JSONDecodeError:
             pass
     return {cat:[] for cat in CATEGORIES.values()}
 
 def save_db(db):
-    for category in db:
-        # Prevents breaking on unsanitized strings using literal evaluations mapping
-        db[category] = sorted(db[category], key=lambda x: str(x.get('Name', '')).lower())
+    # Enforces absolute sorting of the dictionary keys so categories never shift downwards
+    ordered_db = {cat: db.get(cat,[]) for cat in CATEGORIES.values()}
+    for category in ordered_db:
+        if isinstance(ordered_db[category], list):
+            ordered_db[category] = sorted(ordered_db[category], key=lambda x: str(x.get('Name', '')).lower())
+            
     with open(DB_FILE, 'w', encoding='utf-8') as f:
-        json.dump(db, f, indent=4, ensure_ascii=False)
+        json.dump(ordered_db, f, indent=4, ensure_ascii=False)
 
-
-def generate_statistics(db):
-    """Calculates data footprint tracking safely rendering output metrics dynamically."""
+def generate_statistics(db, pending_counts=None):
+    if pending_counts is None:
+        pending_counts = {}
+        
     try:
-        total = sum(len(srcs) for srcs in db.values())
-        cat_counts = {cat: len(srcs) for cat, srcs in db.items()}
-        bias_tally, fact_tally = {}, {}
+        total = sum(len(srcs) for srcs in db.values() if isinstance(srcs, list))
+        cat_counts = {cat: len(srcs) for cat, srcs in db.items() if isinstance(srcs, list)}
+        
+        # Comprehensive tally dictionaries
+        tallies = {
+            'Bias': {}, 'Factuality': {}, 'Credibility': {}, 
+            'Freedom': {}, 'Type': {}, 'Country': {}
+        }
         
         for srcs in db.values():
+            if not isinstance(srcs, list): continue
             for src in srcs:
-                b = src.get('Bias') or 'Unknown'
-                f = src.get('Factuality') or 'Unknown'
-                bias_tally[b] = bias_tally.get(b, 0) + 1
-                fact_tally[f] = fact_tally.get(f, 0) + 1
+                if not isinstance(src, dict): continue
+                for key in tallies.keys():
+                    val = str(src.get(key) or 'Unknown')
+                    tallies[key][val] = tallies[key].get(val, 0) + 1
 
         md = f"# MBFC Database Statistics\n\n"
         md += f"**Last Synchronized (UTC):** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        md += f"**Total Valid Sources Indexed:** {total}\n\n"
+        md += f"**Total Monitored Sources Indexed:** {total}\n\n"
         
-        md += "### Core MBFC Categories \n| Alias Assignment | Stored Entities |\n|---|---|\n"
-        for cat, count in sorted(cat_counts.items(), key=lambda i: i[1], reverse=True):
-            md += f"| {cat} | {count} |\n"
+        md += "### Categories Alignment\n| Category | In Database | Remaining (Pending) |\n|---|---|---|\n"
+        for cat in CATEGORIES.values():
+            db_ct = cat_counts.get(cat, 0)
+            pend_ct = pending_counts.get(cat, 0)
+            md += f"| {cat} | {db_ct} | {pend_ct} |\n"
             
-        md += "\n### Master Bias Distribution Top 10\n| Rating Grouping | Entry Sum |\n|---|---|\n"
-        for b, count in sorted(bias_tally.items(), key=lambda i: i[1], reverse=True)[:10]:
-            if b != "Unknown": md += f"| {b} | {count} |\n"
+        def make_table(title, tally_dict, top=10):
+            res = f"\n### {title} Distribution\n| {title} | Count |\n|---|---|\n"
+            sorted_items = sorted(tally_dict.items(), key=lambda i: i[1], reverse=True)
+            count = 0
+            for k, v in sorted_items:
+                if k != "Unknown":
+                    res += f"| {k} | {v} |\n"
+                    count += 1
+                    if count >= top: break
+            return res
 
-        md += "\n### Standard Factuality Scaling Top 10\n| Evaluation Bracket | Entry Sum |\n|---|---|\n"
-        for f, count in sorted(fact_tally.items(), key=lambda i: i[1], reverse=True)[:10]:
-            if f != "Unknown": md += f"| {f} | {count} |\n"
+        md += make_table("Bias", tallies['Bias'])
+        md += make_table("Factuality", tallies['Factuality'])
+        md += make_table("Credibility", tallies['Credibility'])
+        md += make_table("Freedom", tallies['Freedom'])
+        md += make_table("Type", tallies['Type'])
+        md += make_table("Country", tallies['Country'], top=15)
 
         with open(STATS_FILE, 'w', encoding='utf-8') as f_out:
             f_out.write(md)
             
     except Exception as e:
-        print(f"[WARN] Metric logging glitch dynamically averted continuing... {e}", flush=True)
+        print(f"\n[!] Error generating stats Markdown file: {e}", flush=True)
 
-# --- FORMAT METRIC UTILS ---
+# --- CLEANING TOOLS ---
 def clean_string(val):
     if not val: return None
     v = str(val).strip()
     if v.lower() in["", "n/a", "unknown", "unrated", "none", "—"]: return None
     return v
 
-def clean_name(title):
-    t = clean_string(title)
-    if not t: return None
+def clean_name(t):
+    if not clean_string(t): return None
     return re.sub(r'\s*[-–—]\s*Bias and Credibility.*$', '', t, flags=re.IGNORECASE).strip()
 
-def clean_domain(url_text):
-    u = clean_string(url_text)
+def clean_domain(u):
+    u = clean_string(u)
     if not u: return None
     if "." not in u: return u
     if not u.startswith(('http://', 'https://')): u = 'http://' + u
     return f"{urlparse(u).netloc.replace('www.', '')}{urlparse(u).path.rstrip('/')}"
 
-def clean_bias(text):
-    t = clean_string(text)
+def clean_bias(t):
+    t = clean_string(t)
     if not t: return None
-    t = re.sub(r'\([0-9.-]+\)', '', t)
+    t = re.sub(r'\([0-9.-]+\)', '', t) 
     t = re.sub(r'\bBIAS\b', '', t, flags=re.IGNORECASE)
     t = re.sub(r'-\s+', '-', t) 
     return t.strip().title()
 
-def clean_factuality(text):
-    t = clean_string(text)
+def clean_factuality(t):
+    t = clean_string(t)
     if not t: return None
     return re.sub(r'\([0-9.-]+\)', '', t).strip().title()
 
-def clean_metric_standard(text):
-    t = clean_string(text)
+def clean_metric_standard(t):
+    t = clean_string(t)
     if not t: return None
     return re.sub(r'\b(CREDIBILITY|TRAFFIC)\b', '', t, flags=re.IGNORECASE).strip().title()
 
-def clean_freedom(text):
-    t = clean_string(text)
+def clean_freedom(t):
+    t = clean_string(t)
     if not t: return None
     match = re.search(r'(\d+/\d+)', t) 
     if match: return f"RSF {match.group(1)}"
     return t.title()
 
-def get_clean_text(soup_element):
-    """Effectively bridges line gap restrictions internally formatting texts securely."""
-    return soup_element.get_text(separator='\n', strip=True).replace('\xa0', ' ')
+def get_clean_text(html_string):
+    s = re.sub(r'<br\s*/?>', '\n', html_string, flags=re.IGNORECASE)
+    s = re.sub(r'</(p|div|li|h[1-6])>', '\n', s, flags=re.IGNORECASE)
+    soup = BeautifulSoup(s, 'html.parser')
+    text = soup.get_text(separator=' ').replace('\xa0', ' ')
+    text = re.sub(r' {2,}', ' ', text)
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    return '\n'.join(lines)
 
-# --- WEB STRUCTURAL EXTRACTOR LAYER ---
+
+# --- DATA EXTRACTION TARGETS ---
 def extract_source_data(html_content, review_url):
     soup = BeautifulSoup(html_content, 'html.parser')
     
@@ -191,7 +209,6 @@ def extract_source_data(html_content, review_url):
         "Checked": datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ') 
     }
 
-    # Grab Main Identifier Source Root Title Component 
     title_tag = soup.find('h1', class_='entry-title') or soup.find('h1')
     if title_tag: raw_data["Name"] = clean_name(title_tag.get_text(strip=True))
 
@@ -199,9 +216,8 @@ def extract_source_data(html_content, review_url):
     if not entry_content:
         return {k: v for k, v in raw_data.items() if v is not None}
 
-    # Translates tags allowing independent validation mappings seamlessly 
-    text_content = get_clean_text(entry_content)
-    
+    text_content = get_clean_text(str(entry_content))
+
     parsing_patterns = {
         "Bias": (r'Bias Rating:\s*([^\n]+)', clean_bias),
         "Factuality": (r'Factual Reporting:\s*([^\n]+)', clean_factuality),
@@ -213,7 +229,6 @@ def extract_source_data(html_content, review_url):
         "Reasoning": (r'(?:Questionable Reasoning|Reasoning):\s*([^\n]+)', clean_string)
     }
 
-    # Deploy Regex Rules directly dynamically locating elements natively reliably safely! 
     for key, (pattern, cleaner_func) in parsing_patterns.items():
         m = re.search(pattern, text_content, re.IGNORECASE)
         if m: raw_data[key] = cleaner_func(m.group(1))
@@ -231,8 +246,6 @@ def extract_source_data(html_content, review_url):
     upd_match = re.search(r'Last Updated on ([a-zA-Z]+ \d{1,2}, \d{4})', text_content, re.IGNORECASE)
     if upd_match: raw_data["Updated"] = upd_match.group(1)
 
-
-    # Native secondary tag evaluations capturing absent text conditions intelligently exactly appropriately formatting data variables
     for img in entry_content.find_all('img'):
         alt = img.get('alt', '').lower()
         if "factual reporting:" in alt and not raw_data.get("Factuality"):
@@ -252,143 +265,153 @@ def extract_source_data(html_content, review_url):
             elif "conspiracy" in alt or "pseudoscience" in alt: raw_data["Bias"] = "Conspiracy-Pseudoscience"
             elif "questionable" in alt: raw_data["Bias"] = "Questionable"
 
-    return {k: v for k, v in raw_data.items() if v is not None}
+    return raw_dati
 
-# --- PRIMARY THREAD CONTROL SEQUENCE ---
+
+# --- MASTER APP ROUTING PROCESS ---
 def main():
     global global_db, SHUTDOWN_REQUESTED
     init_files()
     session = get_robust_session()
     global_db = load_db()
     
-    # Fast Memory Scan matching exactly valid tracking indices efficiently  
     scraped_dates_lookup = {
         src['Review']: src.get('Checked', '1970-01-01T00:00:00Z') 
-        for srcs in global_db.values() for src in srcs if 'Review' in src
+        for srcs in global_db.values() for src in srcs if isinstance(src, dict) and 'Review' in src
     }
 
-    print("[INFO] Indexing Phase Running -> Connecting mapping states internally...", flush=True)
+    print("Fetching Target Master Lists from Directory...\n", flush=True)
     master_links_lookup = {}  
-    pending_tasks = {}
+    pending_tasks = {cat:[] for cat in CATEGORIES.values()}
     
-    for url, cat_name in CATEGORIES.items():
-        pending_tasks[cat_name] =[]
-        try:
-            r = session.get(url, timeout=15)
-            soup = BeautifulSoup(r.text, 'html.parser')
-            raw_links =[]
-            
-            mbfc_table = soup.find('table', id='mbfc-table')
-            if mbfc_table:
-                raw_links = mbfc_table.find_all('a', href=True)
-            else:
-                entry = soup.select_one('div.entry-content')
-                if entry:
-                    collecting = False
-                    for element in entry.children:
-                        if element.name is None: continue
-                        text = element.get_text()
-                        if "Click the links below" in text:
-                            collecting = True; continue
-                        if "class" in element.attrs and "post-modified-info" in element.attrs.get("class",[]): break
-                        if collecting: raw_links.extend(element.find_all('a', href=True))
-            
-            # Drops completely identical paths located efficiently saving errors intrinsically structurally naturally seamlessly properly 
-            unique_for_cat = set()
-            for a in raw_links:
-                href = a['href'].strip()
-                path_seg = urlparse(href).path.strip('/').split('/')[0] if urlparse(href).path else ""
+    # We will use a try-finally block to ensure that no matter what error or timeout happens, 
+    # save_db() and generate_statistics() ALWAYS run correctly.
+    try:
+        for url, cat_name in CATEGORIES.items():
+            try:
+                r = session.get(url, timeout=15)
+                soup = BeautifulSoup(r.text, 'html.parser')
+                raw_links =[]
+                mbfc_table = soup.find('table', id='mbfc-table')
                 
-                if ('mediabiasfactcheck.com' in href or href.startswith('/')) and path_seg not in EXCLUDED_PATHS:
-                    unique_for_cat.add(href)
-                    master_links_lookup[href] = cat_name
+                if mbfc_table:
+                    raw_links = mbfc_table.find_all('a', href=True)
+                else:
+                    entry = soup.select_one('div.entry-content')
+                    if entry:
+                        collecting = False
+                        for element in entry.children:
+                            if element.name is None: continue
+                            text = element.get_text()
+                            if "Click the links below" in text:
+                                collecting = True; continue
+                            if "class" in element.attrs and "post-modified-info" in element.attrs.get("class",[]): break
+                            if collecting: raw_links.extend(element.find_all('a', href=True))
+                
+                unique_for_cat = set()
+                for a in raw_links:
+                    href = a['href'].strip()
+                    path_seg = urlparse(href).path.strip('/').split('/')[0] if urlparse(href).path else ""
+                    if ('mediabiasfactcheck.com' in href or href.startswith('/')) and path_seg not in EXCLUDED_PATHS:
+                        unique_for_cat.add(href)
+                        master_links_lookup[href] = cat_name
+                        
+                for link in unique_for_cat:
+                    if link not in scraped_dates_lookup:
+                        pending_tasks[cat_name].append(link)
+
+                in_db_ct = len(unique_for_cat) - len(pending_tasks[cat_name])
+                
+                # Simplified and cleaned up Indents
+                print(f"• {cat_name}: {len(unique_for_cat)} found. {in_db_ct} DB. {len(pending_tasks[cat_name])} New.", flush=True)
+
+            except Exception as e:
+                print(f"[ERR] Failed fetching category ({cat_name}): {e}", flush=True)
+
+        total_pending = sum(len(urls) for urls in pending_tasks.values())
+        execution_groups = {}
+
+        # --- ROUTING SYSTEM LOGIC SWITCH ---
+        if total_pending > 0:
+            print(f"\n[INFO] {total_pending} new links found. Starting extraction.", flush=True)
+            
+            # Start strictly with the category with the LEAST detected new entries (excluding zeroes)
+            pending_filtered = {k: v for k, v in pending_tasks.items() if len(v) > 0}
+            for cat, urllist in sorted(pending_filtered.items(), key=lambda i: len(i[1])):
+                execution_groups[cat] = urllist
+        else:
+            BATCH_UPDATE_COUNT = 75
+            print(f"\n[INFO] Database is up to date. Reassessing the {BATCH_UPDATE_COUNT} oldest records.\n", flush=True)
+            active_in_db =[u for u in scraped_dates_lookup.keys() if u in master_links_lookup]
+            oldest_ranked = sorted(active_in_db, key=lambda u: scraped_dates_lookup[u])[:BATCH_UPDATE_COUNT]
+
+            for cat in CATEGORIES.values():
+                execution_groups[cat] =[]
+            for old_href in oldest_ranked:
+                execution_groups[master_links_lookup[old_href]].append(old_href)
+
+        urls_processed_this_run = 0
+
+        for cat_name, urls in execution_groups.items():
+            if not urls: continue
+            cat_total = len(urls)
+            
+            # Simplified Category Header
+            print(f"\n--- Category: {cat_name} ({cat_total} entries) ---", flush=True)
+
+            for idx, href in enumerate(urls, 1):
+                if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS):
+                     print(f"\n[!] Session timeout reached (4 hours). Saving progress and exiting...", flush=True)
+                     break
                     
-            for link in unique_for_cat:
-                if link not in scraped_dates_lookup:
-                    pending_tasks[cat_name].append(link)
+                try:
+                    r = session.get(href, timeout=12)
+                    if r.status_code == 200:
+                        
+                        for check_cat in list(global_db.keys()):
+                            global_db[check_cat] = [s for s in global_db[check_cat] if isinstance(s, dict) and s.get('Review') != href]
+                        
+                        new_data_pkg = extract_source_data(r.text, href)
+                        global_db[cat_name].append(new_data_pkg)
 
-            # Elegant Status Formatting Structure Native  
-            in_db_ct = len(unique_for_cat) - len(pending_tasks[cat_name])
-            print(f"  -> {cat_name.ljust(15)} : {str(len(unique_for_cat)).ljust(4)} Map Nodes | {str(in_db_ct).ljust(4)} Processed DB Syncs | {str(len(pending_tasks[cat_name])).ljust(4)} Assigned", flush=True)
+                        p = [f"[{idx}/{cat_total}] [✓] {new_data_pkg.get('Name', 'Null Trace')[:65]}"]
+                        
+                        if 'Bias' in new_data_pkg: p.append(f"B: {new_data_pkg['Bias']}")
+                        if 'Factuality' in new_data_pkg: p.append(f"F: {new_data_pkg['Factuality']}")
+                        if 'Credibility' in new_data_pkg: p.append(f"C: {new_data_pkg['Credibility']}")
+                        if 'Freedom' in new_data_pkg: p.append(f"FR: {new_data_pkg['Freedom']}")
+                        if 'Traffic' in new_data_pkg: p.append(f"T: {new_data_pkg['Traffic']}")
+                        if 'Type' in new_data_pkg: p.append(f"Type: {new_data_pkg['Type']}")
+                        if 'Country' in new_data_pkg: p.append(f"Country: {new_data_pkg['Country']}")
+                        if 'Reasoning' in new_data_pkg: p.append(f"Rsn: {new_data_pkg['Reasoning']}")
+                        print(" | ".join(p), flush=True)
 
-        except Exception as e:
-            print(f"[!] Endpoint map fail target URL mapping {cat_name}: {e}", flush=True)
+                    elif r.status_code == 404:
+                         print(f"[{idx}/{cat_total}] [!] 404 Not Found. Skipping.", flush=True)
+                    
+                    urls_processed_this_run += 1
+                    if urls_processed_this_run % 15 == 0:
+                         save_db(global_db)
 
-    sorted_tasks = sorted(pending_tasks.items(), key=lambda item: len(item[1]))
-    total_pending = sum(len(urls) for urls in pending_tasks.values())
-    execution_queue =[]
+                except Exception as e:
+                    print(f"[{idx}/{cat_total}] [X] Network Error: {e}", flush=True)
 
-    # MODE CHECK RUN
-    if total_pending > 0:
-        print(f"\n[QUEUE MODE] FOUND NEW INDEX LIMIT ({total_pending}). Executing Standard Run Append Mapping Cycles.\n", flush=True)
-        for cat, urllist in sorted_tasks:
-            for hr in urllist:
-                 execution_queue.append((hr, cat))
-    else:
-        BATCH_UPDATE_COUNT = 75
-        print(f"\n[QUEUE MODE] ACTIVE MAINTENANCE DETECTED. Identifying oldest target batches dynamically for updating existing variables locally[Size Array Format Limit Count Base Limits = {BATCH_UPDATE_COUNT}].\n", flush=True)
-        
-        active_in_db =[u for u in scraped_dates_lookup.keys() if u in master_links_lookup]
-        oldest_ranked = sorted(active_in_db, key=lambda u: scraped_dates_lookup[u])[:BATCH_UPDATE_COUNT]
+                time.sleep(1.6)
 
-        for old_href in oldest_ranked:
-            execution_queue.append((old_href, master_links_lookup[old_href]))
+            if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS): 
+                 break
 
-
-    total_queued = len(execution_queue)
-    if total_queued == 0: 
-        print("\n[OK] Run state effectively clean resulting process shutdown flawlessly correctly.", flush=True)
-        return
-
-    print(f"\n------ Executing Request Extraction Protocol Block Base Queue Tracker Limit -> [{total_queued}]  ------\n", flush=True)
-    urls_processed_this_run = 0
-
-    for idx, (href, target_category) in enumerate(execution_queue, 1):
-
-        # Handles the shutdown loop flawlessly allowing save context 
-        if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS):
-            print(f"\n[!] GitHub action limits requested shutdown. Saving currently held items permanently accurately preserving run progress perfectly dynamically properly handling closure limits inherently. Done.", flush=True)
-            save_db(global_db)
-            generate_statistics(global_db)
-            sys.exit(0)
-
-        try:
-            r = session.get(href, timeout=12)
-            if r.status_code == 200:
-                
-                # Retrieve fully correct new array dictionaries directly successfully 
-                new_data_pkg = extract_source_data(r.text, href)
-
-                # Overwrite and Wipe Migration format log safely destroying old variables strictly replacing exactly cleanly flawlessly mapping new dictionary values efficiently seamlessly cleanly removing ghost errors exactly. 
-                for check_cat in list(global_db.keys()):
-                     global_db[check_cat] = [s for s in global_db[check_cat] if s.get('Review') != href]
-                
-                global_db[target_category].append(new_data_pkg)
-
-                p = [f"[{idx}/{total_queued}] [✓] {new_data_pkg.get('Name', 'Unknown Extract Output')[:65]}"]
-                for ky in['Bias', 'Factuality', 'Credibility', 'Freedom', 'Traffic', 'Type', 'Country', 'Reasoning']:
-                    if ky in new_data_pkg:
-                        al = 'C' if ky == 'Credibility' else 'F' if ky == 'Factuality' else 'B' if ky == 'Bias' else 'T' if ky == 'Traffic' else 'FR' if ky == 'Freedom' else ky
-                        p.append(f"{al}: {new_data_pkg[ky]}")
-                print(" | ".join(p), flush=True)
-
-            elif r.status_code == 404:
-                print(f"[{idx}/{total_queued}] [X] Target Missing (HTTP Error Trace Exception Catch Resolves Limits Accurately). Handled Code Bypass Check OK", flush=True)
-            
-            # Disk push check correctly mapping inherently protecting arrays securely formatting properly handling accurately cleanly continuously flawlessly saving variables logically successfully continuously handling elegantly accurately tracking limit writes actively resolving dynamically mapping 
-            urls_processed_this_run += 1
-            if urls_processed_this_run % 20 == 0: 
-                save_db(global_db)
-
-        except Exception as e:
-            print(f"[{idx}/{total_queued}] [X] Engine framework disruption successfully dropped -> {e}", flush=True)
-
-        time.sleep(1.6)
-
-    print("\n[OK] Run iteration index queue cycle concluded dynamically executing proper saves explicitly exactly generating cleanly output blocks completely cleanly efficiently effortlessly smoothly effortlessly natively accurately saving effectively.", flush=True)
-    save_db(global_db)
-    generate_statistics(global_db)
-
+    except KeyboardInterrupt:
+        print("\n[!] Process interrupted by user.", flush=True)
+    except Exception as e:
+        print(f"\n[!] Unexpected error during execution: {e}", flush=True)
+        traceback.print_exc()
+    finally:
+        # Ensures that even if the code crashes or times out, Data and Stats will be written perfectly.
+        print("\n[OK] Processing complete. Saving database and generating statistics.", flush=True)
+        pending_counts_for_stats = {cat: len(tasks) for cat, tasks in pending_tasks.items()}
+        save_db(global_db)
+        generate_statistics(global_db, pending_counts_for_stats)
 
 if __name__ == "__main__":
     main()
