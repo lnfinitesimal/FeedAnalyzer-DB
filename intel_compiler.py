@@ -10,8 +10,8 @@ import pycountry
 DB_FILE     = "ratings.json"
 MD_FILE     = "statistics.md"
 HOMEPAGE    = "https://mediabiasfactcheck.com/"
-RECHECK     = 14 * 86400       # 14-day freshness window
-MAX_RUNTIME = 310 * 60         # 310 min — 30 min buffer before GitHub's 340 min limit
+RECHECK     = 14 * 86400
+MAX_RUNTIME = 310 * 60
 START_TIME  = time.time()
 
 TARGET_ENDPOINTS = {
@@ -61,7 +61,6 @@ TRIVIAL_PATHS = {
     "default.aspx", "default.htm", "wp", "blog",
 }
 
-# ── Trivial subdomains (stripped like www) ──────────────────────────────────
 TRIVIAL_SUBDOMAINS = {
     "www", "www1", "www2", "www3", "ww1", "ww2", "ww3",
     "m", "mobile", "amp",
@@ -72,10 +71,9 @@ TRIVIAL_SUBDOMAINS = {
     "feeds", "rss", "feed",
 }
 
-# ── Failure tracking (separate from main DB) ───────────────────────────────
 FAIL_FILE   = "failures.json"
-FAIL_EXPIRY = 90 * 86400   # forget failures after 90 days
-FAIL_MAX    = 3             # stop retrying after 3 failures (until expiry)
+FAIL_EXPIRY = 90 * 86400
+FAIL_MAX    = 3
 
 _SOURCE_LINE = [
     re.compile(r"Sources?\s*(?:URL)?\s*:", re.I),
@@ -85,7 +83,7 @@ _SOURCE_LINE = [
     re.compile(r"URL\s*:", re.I),
 ]
 
-# ── Bias normalisation (page-level extraction) ─────────────────────────────
+# ── Bias normalisation ─────────────────────────────────────────────────────
 BIAS_NORMALIZE = {
     "CONSPIRACY-PSEUDOSCIENCE": "Conspiracy",
     "CONSPIRACY PSEUDOSCIENCE": "Conspiracy",
@@ -114,6 +112,22 @@ BIAS_NORMALIZE = {
 }
 
 _BIAS_KEYS_BY_LEN = sorted(BIAS_NORMALIZE, key=len, reverse=True)
+
+# ── Special categories that override political lean ────────────────────────
+# "LEFT SATIRE" → Satire (not Left).  These are MBFC "meta-categories"
+# that take priority over any political-lean label in the same value.
+_CATEGORY_KEYWORDS = [
+    ("SATIRE",        "Satire"),
+    ("PSEUDOSCIENCE", "Conspiracy"),
+    ("CONSPIRACY",    "Conspiracy"),
+    ("QUESTIONABLE",  "Questionable"),
+    ("FAKE NEWS",     "Questionable"),
+    ("PRO-SCIENCE",   "Pro-Science"),
+    ("PRO SCIENCE",   "Pro-Science"),
+]
+
+# Political-lean values that can be overridden by a category indicator
+_POLITICAL_LEAN = {"Left", "Left-Center", "Least Biased", "Right-Center", "Right"}
 
 # ── Country normalisation ───────────────────────────────────────────────────
 COUNTRY_DISCARD = {"UNKNOWN", "N/A", "NA", "NONE", "TBD", "VARIOUS", "MULTIPLE"}
@@ -156,7 +170,6 @@ _PYCOUNTRY_OVERRIDES = {
     "United Kingdom of Great Britain and Northern Ireland": "United Kingdom",
 }
 
-# ── Country capture truncation ──────────────────────────────────────────────
 _COUNTRY_STOP_RE = re.compile(
     r'\s+(?:but|and|or|with|while|however|although|though|yet|also|'
     r'that|which|where|who|whose|as|for|from|by|at|'
@@ -165,7 +178,6 @@ _COUNTRY_STOP_RE = re.compile(
     re.I,
 )
 
-# ── Pre-computed set of every valid normalised country name ─────────────────
 _KNOWN_COUNTRIES = set()
 for _c in pycountry.countries:
     _name = _PYCOUNTRY_OVERRIDES.get(_c.name, _c.name)
@@ -197,24 +209,17 @@ def time_remaining():
 
 
 def source_key_from_url(url_str):
-    """Canonical source key via tldextract.
-    Handles multi-level TLDs (co.uk, com.au) and preserves meaningful
-    subdomains (news.bbc.co.uk) while stripping www + trivial variants
-    (m., mobile., amp., edition., etc.)."""
     try:
         p = urlparse(url_str.strip().rstrip("/"))
         ext = tldextract.extract(url_str)
         if not ext.domain or not ext.suffix:
             return None
-
         sub_parts = [s for s in ext.subdomain.lower().split(".")
                      if s and s not in TRIVIAL_SUBDOMAINS]
         registered = f"{ext.domain}.{ext.suffix}".lower()
         dom = f"{'.'.join(sub_parts)}.{registered}" if sub_parts else registered
-
         if _is_blacklisted(dom) or len(dom) < 4:
             return None
-
         path = p.path.strip("/")
         if path and path.lower() not in TRIVIAL_PATHS:
             return f"{dom}/{path}"
@@ -228,81 +233,46 @@ def root_domain_of_key(key):
 
 
 def normalize_country(raw):
-    """Normalise a raw country string to a canonical name.
-
-    Pipeline:
-      1. Truncate at conjunctions/verbs (prevents "USA but operates in Canada")
-      2. Strip parenthetical scores, trailing punctuation
-      3. Discard known non-country tokens
-      4. Manual map → exact pycountry lookup
-      5. Validate against known-countries set
-      6. Return None (not raw text) if unrecognised — never guess
-    """
     if not raw:
         return None
-
-    # ① Truncate at conjunctions / prose verbs
     truncated = _COUNTRY_STOP_RE.split(raw)[0].strip()
-
-    # ② Strip parenthetical content and numeric scores
     truncated = re.sub(r"\([^)]*\)", "", truncated)
     truncated = re.sub(r"\s*[\d.]+\s*$", "", truncated)
     truncated = truncated.strip(" \t\n\r.,;:–—-/")
-
-    if not truncated:
+    if not truncated or len(truncated) > 50:
         return None
-    if len(truncated) > 50:
-        return None
-
     wu = truncated.upper().strip()
-
     if wu in COUNTRY_DISCARD:
         return None
-
-    # ③ US variants
     if re.search(r'\b(US|USA|UNITED STATES|UNITED STATES OF AMERICA)\b', wu) \
        or re.search(r'(?<!\w)U\.S\.A?\.?(?!\w)', wu):
         return "USA"
-
-    # ④ UK variants
     if re.search(r'\b(UK|UNITED KINGDOM|GREAT BRITAIN)\b', wu) \
        or re.search(r'(?<!\w)U\.K\.?(?!\w)', wu):
         return "United Kingdom"
-
-    # ⑤ Manual map (exact, uppercased)
     if wu in COUNTRY_MANUAL:
         return COUNTRY_MANUAL[wu]
-
-    # ⑥ Cosmetic title-case for pycountry
-    cosmetic = (truncated.strip()
-                .title()
+    cosmetic = (truncated.strip().title()
                 .replace(" And ", " and ")
                 .replace(" Of ", " of ")
                 .replace(" The ", " the "))
-
-    # ⑦ Exact pycountry lookup (handles alpha-2, alpha-3, official names)
     try:
         country = pycountry.countries.lookup(cosmetic)
         return _PYCOUNTRY_OVERRIDES.get(country.name, country.name)
     except LookupError:
         pass
-
     try:
         country = pycountry.countries.lookup(truncated.strip())
         return _PYCOUNTRY_OVERRIDES.get(country.name, country.name)
     except LookupError:
         pass
-
-    # ⑧ Final validation: only return if it's a known country name
-    #    NO fuzzy matching — that's where hallucinations come from
     if cosmetic in _KNOWN_COUNTRIES:
         return cosmetic
-
     return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  HTTP CLIENT — 3-attempt with escalating backoff & circuit breaker
+#  HTTP CLIENT
 # ═══════════════════════════════════════════════════════════════════════════
 class HTTPClient:
     def __init__(self):
@@ -318,22 +288,18 @@ class HTTPClient:
             wait = self._backoff_until - now
             print(f"  [⏳] Backoff {wait:.0f}s")
             time.sleep(wait)
-
         base = random.uniform(16, 20) if kind == "listing" else random.uniform(12, 14)
         time.sleep(base)
-
         if self.request_count > 0 and self.request_count >= self._next_rest:
             rest = random.uniform(50, 70)
             print(f"  [zZz] Rest break ({rest:.0f}s)")
             time.sleep(rest)
             self._next_rest = self.request_count + random.randint(30, 40)
-
         headers = {
             "Referer": "https://www.google.com/" if url == HOMEPAGE else HOMEPAGE,
             "Accept-Language": "en-US,en;q=0.9",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
-
         for attempt in range(1, 4):
             try:
                 res = self.session.get(url, timeout=30, headers=headers)
@@ -345,11 +311,9 @@ class HTTPClient:
                     continue
                 self.consecutive_429s += 1
                 return None
-
             if res.status_code == 200:
                 self.consecutive_429s = 0
                 return res
-
             if res.status_code in (429, 403, 503):
                 if attempt < 3:
                     wait = (random.uniform(90, 120) if attempt == 1
@@ -365,10 +329,8 @@ class HTTPClient:
                 print(f"  [!] HTTP {res.status_code} — all attempts failed, "
                       f"backoff (streak: {self.consecutive_429s})")
                 return None
-
             print(f"  [!] HTTP {res.status_code} — {url}")
             return None
-
         return None
 
     @property
@@ -388,7 +350,7 @@ http = HTTPClient()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  EXTRACTION — metrics + source key + page-level bias
+#  EXTRACTION
 # ═══════════════════════════════════════════════════════════════════════════
 def clean_value(val):
     if not val:
@@ -398,8 +360,6 @@ def clean_value(val):
 
 
 def truncate_dom(soup):
-    """Safe copy of entry-content with only trailing noise removed.
-    Retains Detailed Report / Analysis (metrics live there)."""
     raw = soup.find("div", class_="entry-content")
     if not raw:
         return None
@@ -417,13 +377,15 @@ def truncate_dom(soup):
     return content
 
 
-# ── Line-isolated metric extraction ────────────────────────────────────────
-_MAX_RATING_LINE = 120  # structured rating lines are always short
+_MAX_RATING_LINE = 120
 
-# Headings that contain structured data — keep collecting past these
-_DATA_HEADINGS = {"detailed report", "rating information", "ratings"}
+_DATA_HEADINGS = {
+    "detailed report", "rating information", "ratings",
+    "source overview", "overview", "bias rating",
+    "detailed information", "source information",
+    "factual reporting", "credibility rating",
+}
 
-# Headings that signal analysis prose — stop collecting
 _PROSE_HEADINGS = {
     "analysis", "reasoning", "analysis / reasoning", "analysis/reasoning",
     "history", "funded by", "funding", "editorial review",
@@ -433,28 +395,18 @@ _PROSE_HEADINGS = {
 
 
 def _info_box_lines(content):
-    """Return text lines from the structured-data region of entry-content.
-
-    Includes everything ABOVE the first heading, plus everything BELOW
-    any 'Detailed Report' heading — but stops at headings that signal
-    the start of analysis prose (Analysis, Reasoning, History, etc.).
-
-    This handles both MBFC page formats:
-      Format A: structured data → <h2>Detailed Report</h2> → analysis
-      Format B: <h2>Detailed Report</h2> → structured data → <h2>Analysis</h2>
-    """
+    """Return text lines from the structured-data region.
+    Continues past known data headings, stops at known prose headings,
+    continues past unknown headings."""
     pieces = []
     for child in content.children:
         if hasattr(child, "name") and child.name in ("h2", "h3", "h4", "h5"):
             heading_text = child.get_text(strip=True).lower().strip()
-            # "Detailed Report" etc. CONTAIN structured data — skip heading, keep going
             if any(dh in heading_text for dh in _DATA_HEADINGS):
                 continue
-            # Known prose heading — stop
             if any(ph in heading_text for ph in _PROSE_HEADINGS):
                 break
-            # Unknown heading — stop conservatively
-            break
+            continue
         text = (child.get_text(separator="\n", strip=True)
                 if hasattr(child, "get_text")
                 else str(child).strip())
@@ -464,21 +416,13 @@ def _info_box_lines(content):
 
 
 def _extract_metric_linewise(lines, label_re, whitelist=None):
-    """Scan lines top → bottom for a 'Label: VALUE' pattern.
-
-    Guards against false positives from analysis prose:
-      • re.match  — label must appear at (or very near) the start of the line
-      • MBFC prefix — handles 'MBFC's Country Freedom Rating' etc.
-      • length cap — paragraph sentences are always longer than rating lines
-      • first-match-wins — the structured info box is above the analysis
-    """
     for raw in lines:
         line = raw.strip()
         if not line or len(line) > _MAX_RATING_LINE:
             continue
         m = re.match(
-            r"(?:[\u2022\-•*]\s*)?"       # optional bullet
-            r"(?:MBFC'?s?\s+)?"            # optional "MBFC's" prefix
+            r"(?:[\u2022\-•*]\s*)?"
+            r"(?:MBFC'?s?\s+)?"
             + label_re
             + r"\s*[:\-–—]\s*(.+?)\.?\s*$",
             line, re.I,
@@ -492,94 +436,269 @@ def _extract_metric_linewise(lines, label_re, whitelist=None):
             for v in sorted(whitelist, key=len, reverse=True):
                 if v in val:
                     return v.title()
-            # Label matched but value not in whitelist — skip, keep scanning
             continue
-        # Free-text metric (e.g. country)
         if len(val) <= 40:
             return val.title()
     return None
 
 
-# ── Bias extraction from page ──────────────────────────────────────────────
+# ── Bias extraction ────────────────────────────────────────────────────────
 def _normalize_bias_value(raw):
-    """Normalize a raw bias string to one of the 9 canonical bias names."""
+    """Normalize a raw bias string.  Category keywords (SATIRE, CONSPIRACY,
+    etc.) are checked FIRST so 'LEFT SATIRE' → 'Satire', not 'Left'."""
     if not raw:
         return None
     val = raw.upper().strip()
-    val = re.sub(r"\s*\([\d./]+\)\s*", " ", val)  # strip "(3.5)" scores
+    val = re.sub(r"\s*\([\d./]+\)\s*", " ", val)
     val = re.sub(r"\s+", " ", val).strip()
-    for key in _BIAS_KEYS_BY_LEN:          # longest match wins
+
+    # Category keywords ALWAYS override political lean
+    for keyword, category in _CATEGORY_KEYWORDS:
+        if keyword in val:
+            return category
+
+    for key in _BIAS_KEYS_BY_LEN:
         if key in val:
             return BIAS_NORMALIZE[key]
     return None
 
 
-def extract_page_bias(soup):
-    """Extract the actual bias rating from an individual MBFC source page.
-
-    Three strategies tried in order:
-      1. Explicit "Bias Rating:" line
-      2. "Overall, we rate …" summary sentence
-      3. Bias-badge image alt-tags
-
-    Returns a canonical bias string (e.g. "Right-Center") or None.
-    """
-    content = soup.find("div", class_="entry-content")
-    if not content:
-        return None
-    text = content.get_text(separator="\n", strip=True)
-
-    # ① "Bias Rating: LEFT-CENTER"
-    m = re.search(
-        r"(?:Media\s+)?Bias\s+Rating\s*[:\-–—]\s*([^\n]+)", text, re.I
-    )
-    if m:
-        result = _normalize_bias_value(m.group(1))
-        if result:
-            return result
-
-    # ② "Overall, we rate <source> <BIAS> Biased based on …"
-    m = re.search(
-        r"(?:Overall|In summary)[,\s]+we\s+rate\s+(.+?)(?:\.\s|\.\s*$)",
-        text, re.I | re.MULTILINE,
-    )
-    if m:
-        result = _normalize_bias_value(m.group(1))
-        if result:
-            return result
-
-    # ③ Image alt-tags (only short ones mentioning "bias" etc.)
+def _bias_from_img_alt(content):
+    """Two-pass image alt scan: keyword-gated then ungated short alts."""
     for img in content.find_all("img"):
         alt = (img.get("alt") or "").strip()
         if not alt or len(alt) > 60:
             continue
         au = alt.upper()
         if any(kw in au for kw in (
-            "BIAS", "QUESTIONABLE", "CONSPIRACY",
-            "SATIRE", "PRO-SCIENCE", "PRO SCIENCE",
-            "LEAST BIASED",
+            "BIAS", "BIASED", "QUESTIONABLE", "CONSPIRACY",
+            "PSEUDOSCIENCE", "SATIRE", "PRO-SCIENCE", "PRO SCIENCE",
+            "LEAST BIASED", "FAKE NEWS",
         )):
             result = _normalize_bias_value(alt)
             if result:
                 return result
+    for img in content.find_all("img"):
+        alt = (img.get("alt") or "").strip()
+        if not alt or len(alt) > 25:
+            continue
+        result = _normalize_bias_value(alt)
+        if result:
+            return result
+    return None
+
+
+def _bias_from_img_src(content):
+    """Last-resort: bias from MBFC badge image filenames."""
+    for img in content.find_all("img"):
+        src = (img.get("src") or img.get("data-src") or "").lower()
+        if not src or "mediabiasfactcheck" not in src:
+            continue
+        fname = src.split("/")[-1].split("?")[0]
+        fname = re.sub(r"\.\w+$", "", fname)
+        fname = fname.replace("-", " ").replace("_", " ")
+        result = _normalize_bias_value(fname)
+        if result:
+            return result
+    return None
+
+
+def _detect_category_override(content):
+    """Scan structured data for special-category indicators.
+
+    MBFC uses compound ratings like 'LEFT SATIRE'. When split across
+    lines or HTML elements, the initial extraction may only capture
+    the political lean. This scans info-box lines and images for the
+    category part (SATIRE, CONSPIRACY, QUESTIONABLE, PRO-SCIENCE).
+    """
+    # Scan info-box text lines
+    info_lines = _info_box_lines(content)
+    for line in info_lines:
+        lu = line.strip().upper()
+        if not lu or len(lu) > 50:
+            continue
+        for keyword, category in _CATEGORY_KEYWORDS:
+            if keyword in lu:
+                return category
+
+    # Scan image alt tags
+    for img in content.find_all("img")[:20]:
+        alt = (img.get("alt") or "").upper().strip()
+        if not alt or len(alt) > 60:
+            continue
+        for keyword, category in _CATEGORY_KEYWORDS:
+            if keyword in alt:
+                return category
+
+    # Scan MBFC badge image filenames
+    for img in content.find_all("img")[:20]:
+        src = (img.get("src") or img.get("data-src") or "").lower()
+        if not src or "mediabiasfactcheck" not in src:
+            continue
+        fname = src.split("/")[-1].split("?")[0]
+        fu = fname.replace("-", " ").replace("_", " ").upper()
+        for keyword, category in _CATEGORY_KEYWORDS:
+            if keyword in fu:
+                return category
 
     return None
 
 
-# ── Metrics extraction ─────────────────────────────────────────────────────
-def scrape_metrics(soup):
-    """Extract metrics using a two-phase line-isolated search.
+def extract_page_bias(soup):
+    """Extract bias rating from an MBFC source page.
 
-    Phase 1 — Info-box region (above first prose heading, through
-        'Detailed Report'): Structured 'Label: VALUE' lines live here.
-
-    Phase 2 — Full page (fallback, except country which is info-only):
-        Still line-isolated (re.match + length cap + MBFC prefix),
-        but allows pages with unusual formatting to be parsed.
-
-    Phase 3 — Image alt-tags (last resort):
-        Only the first 15 images are checked.
+    Strategies tried in order:
+      ① 'Bias Rating:' line (with next-line peek for compound ratings)
+      ② 'Overall, we rate …' summary sentence
+      ③④ Image alt-tags (keyword-gated, then ungated short)
+      ⑤ Image src filenames
+      ⑥ Category override: if result is a political lean but the page
+         also contains a special-category indicator (SATIRE, CONSPIRACY,
+         etc.), the category overrides the lean.
     """
+    content = soup.find("div", class_="entry-content")
+    if not content:
+        return None
+    text = content.get_text(separator="\n", strip=True)
+
+    result = None
+
+    # ① "Bias Rating: LEFT-CENTER" (with next-line peek for "LEFT\nSATIRE")
+    if not result:
+        m = re.search(
+            r"(?:Media\s+)?Bias\s+Rating\s*[:\-–—]\s*([^\n]+)", text, re.I
+        )
+        if m:
+            captured = m.group(1).strip()
+            # Peek at the next line: if short, try combining
+            # (handles "LEFT\nSATIRE" split across lines/elements)
+            after = text[m.end():]
+            next_m = re.match(r"\s*\n\s*([A-Za-z][^\n]{0,24})\s*(?:\n|$)", after)
+            if next_m:
+                combined = captured + " " + next_m.group(1).strip()
+                result = _normalize_bias_value(combined)
+            if not result:
+                result = _normalize_bias_value(captured)
+
+    # ② "Overall, we rate <source> <BIAS> based on …"
+    if not result:
+        m = re.search(
+            r"(?:Overall|In summary)[,\s]+we\s+rate\s+(.+?)(?:\.(?:\s|$)|$)",
+            text, re.I | re.MULTILINE,
+        )
+        if m:
+            result = _normalize_bias_value(m.group(1))
+
+    # ③④ Image alt-tags
+    if not result:
+        result = _bias_from_img_alt(content)
+
+    # ⑤ Image src filenames
+    if not result:
+        result = _bias_from_img_src(content)
+
+    # ⑥ Category override: special categories beat political lean
+    # Handles the case where ① captured only "LEFT" but the page
+    # has a SATIRE badge/label/image elsewhere in structured data
+    if result and result in _POLITICAL_LEAN:
+        override = _detect_category_override(content)
+        if override:
+            result = override
+
+    return result
+
+
+# ── Metrics extraction ─────────────────────────────────────────────────────
+def _metrics_from_images(content, metrics):
+    need_f = not metrics.get("f")
+    need_c = not metrics.get("c")
+    need_p = not metrics.get("p")
+    if not (need_f or need_c or need_p):
+        return
+    for img in content.find_all("img"):
+        alt = (img.get("alt") or "").upper().strip()
+        if not alt or len(alt) > 80:
+            continue
+        if need_f:
+            for v in sorted(VALID_FACTUALITY, key=len, reverse=True):
+                if v in alt:
+                    metrics["f"] = v.title()
+                    need_f = False
+                    break
+        if need_c:
+            for v in sorted(VALID_CREDIBILITY, key=len, reverse=True):
+                if v in alt:
+                    metrics["c"] = v.title()
+                    need_c = False
+                    break
+        if need_p:
+            for v in sorted(VALID_FREEDOM, key=len, reverse=True):
+                if v in alt:
+                    metrics["p"] = v.title()
+                    need_p = False
+                    break
+        if not (need_f or need_c or need_p):
+            break
+
+
+def _metrics_from_img_src(content, metrics):
+    need_f = not metrics.get("f")
+    need_c = not metrics.get("c")
+    need_p = not metrics.get("p")
+    if not (need_f or need_c or need_p):
+        return
+    for img in content.find_all("img"):
+        src = (img.get("src") or img.get("data-src") or "").lower()
+        if not src or "mediabiasfactcheck" not in src:
+            continue
+        fname = src.split("/")[-1].split("?")[0]
+        fname = re.sub(r"\.\w+$", "", fname)
+        fu = fname.replace("-", " ").replace("_", " ").upper()
+        if need_f:
+            for v in sorted(VALID_FACTUALITY, key=len, reverse=True):
+                if v in fu:
+                    metrics["f"] = v.title()
+                    need_f = False
+                    break
+        if need_c:
+            for v in sorted(VALID_CREDIBILITY, key=len, reverse=True):
+                if v in fu:
+                    metrics["c"] = v.title()
+                    need_c = False
+                    break
+        if need_p:
+            for v in sorted(VALID_FREEDOM, key=len, reverse=True):
+                if v in fu:
+                    metrics["p"] = v.title()
+                    need_p = False
+                    break
+        if not (need_f or need_c or need_p):
+            break
+
+
+def _metrics_from_summary(full_lines, metrics):
+    if metrics.get("f"):
+        return
+    for line in full_lines:
+        line = line.strip()
+        if len(line) > 300 or len(line) < 20:
+            continue
+        m = re.match(
+            r"(?:Overall|In summary)[,\s]+we\s+rate\s+.+?"
+            r"(?:factual(?:ly)?|reporting)\s+(?:as\s+)?(\w[\w\s]*?)"
+            r"(?:\.|\s+based|\s+due|\s+because|$)",
+            line, re.I,
+        )
+        if m:
+            val = clean_value(m.group(1))
+            if val:
+                for v in sorted(VALID_FACTUALITY, key=len, reverse=True):
+                    if v in val:
+                        metrics["f"] = v.title()
+                        return
+
+
+def scrape_metrics(soup):
     content = soup.find("div", class_="entry-content")
     if not content:
         return {}
@@ -589,11 +708,9 @@ def scrape_metrics(soup):
     info_lines = _info_box_lines(content)
 
     def extract(label_re, whitelist=None, info_only=False):
-        # Priority: info box (structured data region)
         result = _extract_metric_linewise(info_lines, label_re, whitelist)
         if result:
             return result
-        # Fallback: full page (still line-isolated) — unless info_only
         if not info_only:
             return _extract_metric_linewise(full_lines, label_re, whitelist)
         return None
@@ -612,25 +729,12 @@ def scrape_metrics(soup):
             VALID_FREEDOM),
         "o": extract(
             r"(?:Country|Based in|Location)",
-            info_only=True),    # never fall back to analysis text
+            info_only=True),
     }
 
-    # ── Phase 3: Image alt-tag fallback (first 15 images only) ──
-    if not metrics["f"] or not metrics["c"]:
-        for img in content.find_all("img")[:15]:
-            alt = (img.get("alt") or "").upper().strip()
-            if not alt or len(alt) > 60:
-                continue
-            if not metrics["f"]:
-                for v in sorted(VALID_FACTUALITY, key=len, reverse=True):
-                    if v in alt:
-                        metrics["f"] = v.title()
-                        break
-            if not metrics["c"]:
-                for v in sorted(VALID_CREDIBILITY, key=len, reverse=True):
-                    if v in alt:
-                        metrics["c"] = v.title()
-                        break
+    _metrics_from_images(content, metrics)
+    _metrics_from_img_src(content, metrics)
+    _metrics_from_summary(full_lines, metrics)
 
     metrics["o"] = normalize_country(metrics["o"])
     return {k: v for k, v in metrics.items() if v}
@@ -638,43 +742,27 @@ def scrape_metrics(soup):
 
 # ── Source key extraction ──────────────────────────────────────────────────
 def extract_source_key(soup):
-    """5 tag types × 3 patterns → then most-linked-domain fallback.
-
-    Priority order:
-      1. <a href> in a Source/URL line
-      2. Raw URL in a Source/URL line
-      3. Bare domain / (dot) notation in a Source/URL line
-      4. Most-linked external domain across the page (≥2 links required)
-    """
     content = soup.find("div", class_="entry-content")
     if not content:
         return None
 
-    # ── Priorities 1–3: Source/URL line matching ──
     for el in content.find_all(["p", "div", "li", "span", "td"]):
         el_text = el.get_text(strip=True)
         if len(el_text) > 300:
             continue
-
         if not any(pat.match(el_text) for pat in _SOURCE_LINE):
             continue
-
-        # Priority 1: hyperlink
         for link in el.find_all("a", href=True):
             key = source_key_from_url(link["href"])
             dom = root_domain_of_key(key) if key else None
             if key and dom and not _is_blacklisted(dom) and len(dom) > 3:
                 return key
-
-        # Priority 2: raw URL in text
         url_match = re.search(r"https?://[^\s<>\"')]+", el_text, re.I)
         if url_match:
             key = source_key_from_url(url_match.group(0).rstrip(".,;:"))
             dom = root_domain_of_key(key) if key else None
             if key and dom and not _is_blacklisted(dom) and len(dom) > 3:
                 return key
-
-        # Priority 3: bare domain / (dot) notation
         m = re.search(r":\s*(.+)", el_text)
         if m:
             raw = m.group(1).strip()
@@ -686,11 +774,9 @@ def extract_source_key(soup):
                 if key and dom and not _is_blacklisted(dom) and len(dom) > 3:
                     return key
 
-    # ── Priority 4: Most-linked external domain (fallback) ──
     scan_region = truncate_dom(soup) or content
     domain_counts = Counter()
     domain_best_key = {}
-
     for a in scan_region.find_all("a", href=True):
         href = a["href"].strip()
         if not href.startswith("http"):
@@ -704,7 +790,6 @@ def extract_source_key(soup):
         domain_counts[dom] += 1
         if dom not in domain_best_key or len(key) < len(domain_best_key[dom]):
             domain_best_key[dom] = key
-
     if domain_counts:
         best_dom, best_count = domain_counts.most_common(1)[0]
         if best_count >= 2:
@@ -714,7 +799,7 @@ def extract_source_key(soup):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  DATABASE — atomic save + markdown statistics
+#  DATABASE
 # ═══════════════════════════════════════════════════════════════════════════
 def load_database():
     if os.path.exists(DB_FILE):
@@ -736,7 +821,6 @@ def save_database(db):
         os.unlink(tmp)
         raise
 
-    # ── Generate statistics markdown ──
     counters = {"b": {}, "f": {}, "c": {}, "p": {}, "o": {}}
     valid = 0
     for key, entry in db.items():
@@ -775,7 +859,7 @@ def save_database(db):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  FAILURE TRACKING — separate from main DB
+#  FAILURE TRACKING
 # ═══════════════════════════════════════════════════════════════════════════
 def load_failures():
     if os.path.exists(FAIL_FILE):
@@ -788,7 +872,6 @@ def load_failures():
 
 
 def save_failures(failures):
-    """Save failures, expiring entries older than FAIL_EXPIRY."""
     now = int(time.time())
     live = {k: v for k, v in failures.items()
             if v.get("chk", 0) > now - FAIL_EXPIRY}
@@ -803,10 +886,9 @@ def save_failures(failures):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  MIGRATIONS — run once on startup
+#  MIGRATIONS
 # ═══════════════════════════════════════════════════════════════════════════
 def migrate_fail_keys(db):
-    """Move _fail: entries from main DB → failures.json."""
     failures = load_failures()
     migrated = 0
     for key in list(db):
@@ -821,7 +903,6 @@ def migrate_fail_keys(db):
 
 
 def migrate_subdomain_keys(db):
-    """Re-normalize all keys to collapse trivial-subdomain variants."""
     rekeyed = 0
     for old_key in list(db):
         if old_key.startswith("_fail:"):
@@ -842,20 +923,18 @@ def migrate_subdomain_keys(db):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  PHASE 1 — HARVEST all 9 categories
+#  PHASE 1 — HARVEST
 # ═══════════════════════════════════════════════════════════════════════════
 def harvest_category(endpoint_url, bias_name):
     res = http.get(endpoint_url, kind="listing")
     if not res:
         print(f"  [✗] Failed: {bias_name}")
         return []
-
     soup = BeautifulSoup(res.text, "html.parser")
     content = truncate_dom(soup) or soup.find("table", id="mbfc-table")
     if not content:
         print(f"  [✗] No content: {bias_name}")
         return []
-
     urls, seen = [], set()
     for link in content.find_all("a", href=True):
         href = link["href"].strip().rstrip("/")
@@ -868,20 +947,15 @@ def harvest_category(endpoint_url, bias_name):
         if path not in IGNORE_PATHS and path not in TARGET_SLUGS:
             urls.append(href)
             seen.add(href)
-
     return urls
 
 
 def harvest_all(db, failures):
-    """Harvest all 9 categories, cross-reference with DB, build per-category
-    work queues, and print a clear summary."""
-
     print("\n╔══════════════════════════════════════════════════════════════╗")
     print("║              PHASE 1 · HARVESTING ALL CATEGORIES           ║")
     print("╚══════════════════════════════════════════════════════════════╝\n")
 
     now = int(time.time())
-
     url_to_key = {}
     for key, entry in db.items():
         if not key.startswith("_fail:") and "u" in entry:
@@ -911,19 +985,15 @@ def harvest_all(db, failures):
     for bias_name, urls in raw_harvest.items():
         fresh = new = stale = dead = 0
         new_list, stale_list = [], []
-
         for u in urls:
             if failures.get(u, {}).get("fails", 0) >= FAIL_MAX:
                 dead += 1
                 continue
-
             k = url_to_key.get(u)
             if k and k in db:
                 entry = db[k]
                 if entry.get("chk", 0) > now - RECHECK:
                     fresh += 1
-                    # Do NOT overwrite bias from harvest category —
-                    # page-level extraction in Phase 2 is authoritative
                 else:
                     stale += 1
                     stale_list.append(u)
@@ -932,12 +1002,9 @@ def harvest_all(db, failures):
                 new_list.append(u)
 
         categories[bias_name] = {
-            "new": new_list,
-            "stale": stale_list,
-            "fresh": fresh,
-            "dead": dead,
+            "new": new_list, "stale": stale_list,
+            "fresh": fresh, "dead": dead,
         }
-
         grand_harvested += len(urls)
         grand_fresh += fresh
         grand_new += new
@@ -947,7 +1014,6 @@ def harvest_all(db, failures):
     print(f"\n  {'─' * 60}")
     print(f"  {'Category':<20s} {'Total':>6s} {'Fresh':>6s} {'New':>6s} {'Stale':>6s} {'Dead':>6s} {'Todo':>6s}")
     print(f"  {'─' * 60}")
-
     for bias_name in sorted(categories.keys()):
         info = categories[bias_name]
         total = info["fresh"] + len(info["new"]) + len(info["stale"]) + info["dead"]
@@ -956,13 +1022,11 @@ def harvest_all(db, failures):
         print(f"  {bias_name:<20s} {total:>6d} {info['fresh']:>6d} "
               f"{len(info['new']):>6d} {len(info['stale']):>6d} "
               f"{info['dead']:>6d} {todo:>6d}{status}")
-
     print(f"  {'─' * 60}")
     grand_todo = grand_new + grand_stale
     print(f"  {'TOTAL':<20s} {grand_harvested:>6d} {grand_fresh:>6d} "
           f"{grand_new:>6d} {grand_stale:>6d} {grand_dead:>6d} {grand_todo:>6d}")
     print(f"  {'─' * 60}")
-
     if grand_todo == 0:
         print("\n  ✅ All sources are fresh — nothing to do!")
 
@@ -970,10 +1034,9 @@ def harvest_all(db, failures):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  PHASE 2 — PROCESS categories (smallest pending first)
+#  PHASE 2 — PROCESS
 # ═══════════════════════════════════════════════════════════════════════════
 def process_category(db, bias_name, todo_urls, url_to_key, failures):
-    """Process a single category's pending URLs (new first, then stale by age)."""
     now = int(time.time())
 
     def sort_key(u):
@@ -983,7 +1046,6 @@ def process_category(db, bias_name, todo_urls, url_to_key, failures):
         return (1, db.get(k, {}).get("chk", 0))
 
     todo_urls.sort(key=sort_key)
-
     total = len(todo_urls)
     new_ct = upd_ct = 0
     processed_keys = set()
@@ -1003,7 +1065,6 @@ def process_category(db, bias_name, todo_urls, url_to_key, failures):
             continue
 
         soup = BeautifulSoup(res.text, "html.parser")
-
         known_key = url_to_key.get(url)
         source_key = known_key if known_key else extract_source_key(soup)
 
@@ -1027,7 +1088,6 @@ def process_category(db, bias_name, todo_urls, url_to_key, failures):
 
         met = scrape_metrics(soup)
 
-        # ── Authoritative bias: prefer page-level over harvest category ──
         page_bias = extract_page_bias(soup)
         effective_bias = page_bias if page_bias else bias_name
 
@@ -1075,8 +1135,6 @@ def process_category(db, bias_name, todo_urls, url_to_key, failures):
 
 
 def process_all(db, categories, url_to_key, failures):
-    """Process categories ordered by smallest pending count first."""
-
     print("\n╔══════════════════════════════════════════════════════════════╗")
     print("║         PHASE 2 · PROCESSING (smallest pending first)      ║")
     print("╚══════════════════════════════════════════════════════════════╝")
@@ -1086,7 +1144,6 @@ def process_all(db, categories, url_to_key, failures):
         todo = info["new"] + info["stale"]
         if todo:
             cat_queue.append((bias_name, todo))
-
     cat_queue.sort(key=lambda x: len(x[1]))
 
     if not cat_queue:
@@ -1101,7 +1158,6 @@ def process_all(db, categories, url_to_key, failures):
               f"({new_in} new + {stale_in} stale)")
 
     total_new = total_upd = 0
-
     for cat_idx, (bias_name, todo) in enumerate(cat_queue):
         if http.should_stop:
             print(f"\n  [!] Circuit breaker — stopping at category {cat_idx + 1}/{len(cat_queue)}")
@@ -1111,11 +1167,9 @@ def process_all(db, categories, url_to_key, failures):
             break
 
         print(f"\n  ┌── {bias_name} ({len(todo)} pending) ──")
-
         new_ct, upd_ct = process_category(db, bias_name, todo, url_to_key, failures)
         total_new += new_ct
         total_upd += upd_ct
-
         save_database(db)
         save_failures(failures)
 
@@ -1132,8 +1186,6 @@ def process_all(db, categories, url_to_key, failures):
 # ═══════════════════════════════════════════════════════════════════════════
 def main():
     db = load_database()
-
-    # ── One-time migrations ──
     failures = migrate_fail_keys(db)
     migrate_subdomain_keys(db)
     save_database(db)
@@ -1141,7 +1193,6 @@ def main():
     if not http.warmup():
         return
 
-    # ── Phase 1: Harvest ──
     categories, url_to_key = harvest_all(db, failures)
 
     if not categories or http.should_stop:
@@ -1151,15 +1202,12 @@ def main():
         save_failures(failures)
         return
 
-    # ── Pre-processing cooldown ──
     cooldown = random.uniform(60, 90)
     print(f"\n  [*] Pre-processing cooldown: {cooldown:.0f}s")
     time.sleep(cooldown)
 
-    # ── Phase 2: Process ──
     total_new, total_upd = process_all(db, categories, url_to_key, failures)
 
-    # ── Final save + summary ──
     save_database(db)
     save_failures(failures)
     valid = sum(1 for k in db if not k.startswith("_fail:"))
