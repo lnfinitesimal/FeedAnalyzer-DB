@@ -92,9 +92,9 @@ def save_db(db):
         json.dump(ordered_db, f, indent=4, ensure_ascii=False)
     os.replace(temp_file, DB_FILE)
 
-def generate_statistics(db, pending_counts=None):
-    if pending_counts is None:
-        pending_counts = {}
+def generate_statistics(db, master_totals=None):
+    if master_totals is None:
+        master_totals = {}
         
     try:
         total = sum(len(srcs) for srcs in db.values() if isinstance(srcs, list))
@@ -117,14 +117,22 @@ def generate_statistics(db, pending_counts=None):
         md += f"**Last Synchronized (UTC):** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n"
         md += f"**Total Monitored Sources Indexed:** {total}\n\n"
         
-        md += "### Categories Alignment\n| Category | In Database | Remaining (Pending) |\n|---|---|---|\n"
+        # FIX: Added Emojis and dynamically calculate accurate pending URLs based on Master Total expected
+        md += "### 🗂️ Categories Alignment\n| Category | In Database | Pending |\n|---|---|---|\n"
         for cat in CATEGORIES.values():
             db_ct = cat_counts.get(cat, 0)
-            pend_ct = pending_counts.get(cat, 0)
+            total_expected = master_totals.get(cat, 0)
+            pend_ct = max(0, total_expected - db_ct)
             md += f"| {cat} | {db_ct} | {pend_ct} |\n"
             
         def make_table(title, tally_dict, top=10):
-            res = f"\n### {title} Distribution\n| {title} | Count |\n|---|---|\n"
+            emojis = {
+                "Bias": "⚖️", "Factuality": "✅", "Credibility": "⭐",
+                "Freedom": "🗽", "Type": "📰", "Country": "🌍"
+            }
+            emoji = emojis.get(title, "📊")
+            res = f"\n### {emoji} {title} Distribution\n| {title} | Count |\n|---|---|\n"
+            
             sorted_items = sorted(tally_dict.items(), key=lambda i: i[1], reverse=True)
             count = 0
             for k, v in sorted_items:
@@ -288,6 +296,7 @@ def main():
     print("Fetching Target Master Lists from Directory...\n", flush=True)
     master_links_lookup = {}  
     pending_tasks = {cat:[] for cat in CATEGORIES.values()}
+    master_totals = {cat: 0 for cat in CATEGORIES.values()}  # FIX: Stores true grand total of expected sources
     
     try:
         for url, cat_name in CATEGORIES.items():
@@ -319,6 +328,8 @@ def main():
                         unique_for_cat.add(href)
                         master_links_lookup[href] = cat_name
                         
+                master_totals[cat_name] = len(unique_for_cat)  # Log true expected count
+                
                 # ALPHABETICAL FIX: sorted() restores alphabetical order naturally!
                 for link in sorted(unique_for_cat):
                     if link not in scraped_dates_lookup:
@@ -392,9 +403,14 @@ def main():
                     urls_processed_this_run += 1
                     if urls_processed_this_run % 15 == 0:
                          save_db(global_db)
-                         # FIX 1: Generate stats concurrent with DB save
-                         pending_counts_for_stats = {cat: len(tasks) for cat, tasks in pending_tasks.items()}
-                         generate_statistics(global_db, pending_counts_for_stats)
+                         # FIX 1: Generate stats concurrent with DB save, passing master_totals
+                         generate_statistics(global_db, master_totals)
+
+                    # --- PRO-LEVEL EVASION: "The Coffee Break" ---
+                    if urls_processed_this_run % 250 == 0:
+                         cooldown = random.uniform(45.0, 75.0)
+                         print(f"\n[~] Anti-Bot Cooldown: Pausing for {int(cooldown)} seconds...", flush=True)
+                         time.sleep(cooldown)
 
                 except Exception as e:
                     print(f"[{idx}/{cat_total}] [X] Network Error: {e}", flush=True)
@@ -413,9 +429,8 @@ def main():
         traceback.print_exc()
     finally:
         print("\n[OK] Processing complete. Saving database and generating statistics.", flush=True)
-        pending_counts_for_stats = {cat: len(tasks) for cat, tasks in pending_tasks.items()}
         save_db(global_db)
-        generate_statistics(global_db, pending_counts_for_stats)
+        generate_statistics(global_db, master_totals)
 
 if __name__ == "__main__":
     main()
