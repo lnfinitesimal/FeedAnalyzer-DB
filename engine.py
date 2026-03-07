@@ -13,15 +13,16 @@ import traceback
 import random
 
 # --- CONFIGURATION ---
-
 DB_FILE = 'ratings.json'
 STATS_FILE = 'statistics.md'
-MAX_RUNTIME_SECONDS = 14400  # 4 hours timeout limit for Actions
+MAX_RUNTIME_SECONDS = 14400  # 4 hours
 START_TIME = time.time()
 
+# FIX 1: All mutable state is global so the signal handler can access it
 global_db = {}
+master_totals = {}
 SHUTDOWN_REQUESTED = False
-SAVING_IN_PROGRESS = False
+_save_in_progress = False  # Re-entrancy guard
 
 CATEGORIES = {
     "https://mediabiasfactcheck.com/left/": "Left",
@@ -44,30 +45,31 @@ EXCLUDED_PATHS = {
 }
 
 # --- IO / FILE SETUP ---
-
 def init_files():
     if not os.path.exists(DB_FILE):
         with open(DB_FILE, 'w', encoding='utf-8') as f:
-            json.dump({cat:[] for cat in CATEGORIES.values()}, f, indent=4, ensure_ascii=False)
+            json.dump({cat: [] for cat in CATEGORIES.values()}, f, indent=4, ensure_ascii=False)
     if not os.path.exists(STATS_FILE):
         with open(STATS_FILE, 'w', encoding='utf-8') as f:
             f.write("# MBFC Database Statistics\n\nInitializing...\n")
 
+
+# FIX 2: Signal handler performs an IMMEDIATE emergency save before SIGKILL arrives
 def request_shutdown(signum, frame):
     global SHUTDOWN_REQUESTED
     if not SHUTDOWN_REQUESTED:
-        print(f"\n[!] Cancellation requested. Finishing the current URL gracefully, then saving data...", flush=True)
         SHUTDOWN_REQUESTED = True
-
-def force_shutdown(signum, frame):
-    global SAVING_IN_PROGRESS
-    if SAVING_IN_PROGRESS:
-        return # Ignore kill signals if we are already safely in the process of saving to disk
-    print(f"\n[!] Grace period expired (SIGTERM). Interrupting network/sleep immediately to save data...", flush=True)
-    raise KeyboardInterrupt
+        print(f"\n[!] Shutdown signal received (signal {signum}). Emergency save in progress...", flush=True)
+        try:
+            save_db(global_db)
+            generate_statistics(global_db, master_totals)
+            print("[!] Emergency save completed successfully.", flush=True)
+        except Exception as e:
+            print(f"[!] Emergency save failed: {e}", flush=True)
 
 signal.signal(signal.SIGINT, request_shutdown)
-signal.signal(signal.SIGTERM, force_shutdown)
+signal.signal(signal.SIGTERM, request_shutdown)
+
 
 def get_robust_session():
     session = requests.Session()
@@ -77,48 +79,61 @@ def get_robust_session():
     session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
     return session
 
+
 def load_db():
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            for req_cat in CATEGORIES.values():
-                if req_cat not in data:
-                    data[req_cat] =[]
-            return data
+                for req_cat in CATEGORIES.values():
+                    if req_cat not in data:
+                        data[req_cat] = []
+                return data
         except json.JSONDecodeError:
             pass
-    return {cat:[] for cat in CATEGORIES.values()}
+    return {cat: [] for cat in CATEGORIES.values()}
 
+
+# FIX 3: Re-entrancy guard prevents corruption if signal arrives mid-save
 def save_db(db):
-    ordered_db = {cat: db.get(cat,[]) for cat in CATEGORIES.values()}
-    for category in ordered_db:
-        if isinstance(ordered_db[category], list):
-            ordered_db[category] = sorted(ordered_db[category], key=lambda x: str(x.get('Name', '')).lower())
+    global _save_in_progress
+    if _save_in_progress:
+        return  # Already saving — signal handler arrived mid-save; let the original finish
+    _save_in_progress = True
+    try:
+        ordered_db = {cat: db.get(cat, []) for cat in CATEGORIES.values()}
+        for category in ordered_db:
+            if isinstance(ordered_db[category], list):
+                ordered_db[category] = sorted(
+                    ordered_db[category],
+                    key=lambda x: str(x.get('Name', '')).lower()
+                )
+        temp_file = DB_FILE + '.tmp'
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            json.dump(ordered_db, f, indent=4, ensure_ascii=False)
+        os.replace(temp_file, DB_FILE)
+    finally:
+        _save_in_progress = False
 
-    # Atomic Save for Database
-    temp_file = DB_FILE + '.tmp'
-    with open(temp_file, 'w', encoding='utf-8') as f:
-        json.dump(ordered_db, f, indent=4, ensure_ascii=False)
-    os.replace(temp_file, DB_FILE)
 
-def generate_statistics(db, master_totals=None):
-    if master_totals is None:
-        master_totals = {}
-
+def generate_statistics(db, stats_totals=None):
+    if stats_totals is None:
+        stats_totals = {}
     try:
         total = sum(len(srcs) for srcs in db.values() if isinstance(srcs, list))
         cat_counts = {cat: len(srcs) for cat, srcs in db.items() if isinstance(srcs, list)}
-        
+
         tallies = {
-            'Bias': {}, 'Factuality': {}, 'Credibility': {}, 
+            'Bias': {}, 'Factuality': {}, 'Credibility': {},
             'Freedom': {}, 'Type': {}, 'Country': {}
         }
-        
+
         for srcs in db.values():
-            if not isinstance(srcs, list): continue
+            if not isinstance(srcs, list):
+                continue
             for src in srcs:
-                if not isinstance(src, dict): continue
+                if not isinstance(src, dict):
+                    continue
                 for key in tallies.keys():
                     val = str(src.get(key) or 'Unknown')
                     tallies[key][val] = tallies[key].get(val, 0) + 1
@@ -126,20 +141,19 @@ def generate_statistics(db, master_totals=None):
         md = f"# MBFC Database Statistics\n\n"
         md += f"**Last Synchronized (UTC):** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n"
         md += f"**Total Monitored Sources Indexed:** {total}\n\n"
-        
-        # FIX: Added Emojis and dynamically calculate accurate pending URLs based on Master Total expected
+
         md += "### 🗂️ Categories Alignment\n| Category | In Database | Pending |\n|---|---|---|\n"
         sum_db = 0
         sum_pend = 0
         for cat in CATEGORIES.values():
             db_ct = cat_counts.get(cat, 0)
-            total_expected = master_totals.get(cat, 0)
+            total_expected = stats_totals.get(cat, 0)
             pend_ct = max(0, total_expected - db_ct)
             md += f"| {cat} | {db_ct} | {pend_ct} |\n"
             sum_db += db_ct
             sum_pend += pend_ct
         md += f"| **Total** | **{sum_db}** | **{sum_pend}** |\n"
-            
+
         def make_table(title, tally_dict, top=10):
             emojis = {
                 "Bias": "⚖️", "Factuality": "✅", "Credibility": "⭐",
@@ -147,14 +161,14 @@ def generate_statistics(db, master_totals=None):
             }
             emoji = emojis.get(title, "📊")
             res = f"\n### {emoji} {title} Distribution\n| {title} | Count |\n|---|---|\n"
-            
             sorted_items = sorted(tally_dict.items(), key=lambda i: i[1], reverse=True)
             count = 0
             for k, v in sorted_items:
                 if k != "Unknown":
                     res += f"| {k} | {v} |\n"
                     count += 1
-                    if count >= top: break
+                    if count >= top:
+                        break
             return res
 
         md += make_table("Bias", tallies['Bias'])
@@ -164,57 +178,67 @@ def generate_statistics(db, master_totals=None):
         md += make_table("Type", tallies['Type'])
         md += make_table("Country", tallies['Country'], top=15)
 
-        # Atomic Save for Statistics MD
         temp_stats = STATS_FILE + '.tmp'
         with open(temp_stats, 'w', encoding='utf-8') as f_out:
             f_out.write(md)
         os.replace(temp_stats, STATS_FILE)
-            
+
     except Exception as e:
         print(f"\n[!] Error generating stats Markdown file: {e}", flush=True)
 
-# --- CLEANING TOOLS ---
 
+# --- CLEANING TOOLS ---
 def clean_string(val):
-    if not val: return None
+    if not val:
+        return None
     v = str(val).strip()
-    if v.lower() in["", "n/a", "unknown", "unrated", "none", "—"]: return None
+    if v.lower() in ["", "n/a", "unknown", "unrated", "none", "—"]:
+        return None
     return v
 
 def clean_name(t):
-    if not clean_string(t): return None
-    return re.sub(r'\s*[-–—]\sBias and Credibility.$', '', t, flags=re.IGNORECASE).strip()
+    if not clean_string(t):
+        return None
+    return re.sub(r'\s*[-–—]\s*Bias and Credibility.*$', '', t, flags=re.IGNORECASE).strip()
 
 def clean_domain(u):
     u = clean_string(u)
-    if not u: return None
-    if "." not in u: return u
-    if not u.startswith(('http://', 'https://')): u = 'http://' + u
+    if not u:
+        return None
+    if "." not in u:
+        return u
+    if not u.startswith(('http://', 'https://')):
+        u = 'http://' + u
     return f"{urlparse(u).netloc.replace('www.', '')}{urlparse(u).path.rstrip('/')}"
 
 def clean_bias(t):
     t = clean_string(t)
-    if not t: return None
-    t = re.sub(r'([0-9.-]+)', '', t)
+    if not t:
+        return None
+    t = re.sub(r'\([0-9.-]+\)', '', t)
     t = re.sub(r'\bBIAS\b', '', t, flags=re.IGNORECASE)
     t = re.sub(r'-\s+', '-', t)
     return t.strip().title()
 
 def clean_factuality(t):
     t = clean_string(t)
-    if not t: return None
-    return re.sub(r'([0-9.-]+)', '', t).strip().title()
+    if not t:
+        return None
+    return re.sub(r'\([0-9.-]+\)', '', t).strip().title()
 
 def clean_metric_standard(t):
     t = clean_string(t)
-    if not t: return None
+    if not t:
+        return None
     return re.sub(r'\b(CREDIBILITY|TRAFFIC)\b', '', t, flags=re.IGNORECASE).strip().title()
 
 def clean_freedom(t):
     t = clean_string(t)
-    if not t: return None
+    if not t:
+        return None
     match = re.search(r'(\d+/\d+)', t)
-    if match: return f"RSF {match.group(1)}"
+    if match:
+        return f"RSF {match.group(1)}"
     return t.title()
 
 def get_clean_text(html_string):
@@ -223,27 +247,28 @@ def get_clean_text(html_string):
     soup = BeautifulSoup(s, 'html.parser')
     text = soup.get_text(separator=' ').replace('\xa0', ' ')
     text = re.sub(r' {2,}', ' ', text)
-    lines =[line.strip() for line in text.split('\n') if line.strip()]
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
     return '\n'.join(lines)
 
-# --- DATA EXTRACTION TARGETS ---
 
+# --- DATA EXTRACTION ---
 def extract_source_data(html_content, review_url):
     soup = BeautifulSoup(html_content, 'html.parser')
 
     raw_data = {
-        "Name": None, "Review": review_url, "Source": None, "Type": None, 
-        "Traffic": None, "Bias": None, "Reasoning": None, "Factuality": None, 
+        "Name": None, "Review": review_url, "Source": None, "Type": None,
+        "Traffic": None, "Bias": None, "Reasoning": None, "Factuality": None,
         "Credibility": None, "Freedom": None, "Country": None, "Updated": None,
-        "Checked": datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ') 
+        "Checked": datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
     }
 
     title_tag = soup.find('h1', class_='entry-title') or soup.find('h1')
-    if title_tag: raw_data["Name"] = clean_name(title_tag.get_text(strip=True))
+    if title_tag:
+        raw_data["Name"] = clean_name(title_tag.get_text(strip=True))
 
     entry_content = soup.find('div', class_='entry-content')
     if not entry_content:
-        return raw_data 
+        return raw_data
 
     text_content = get_clean_text(str(entry_content))
 
@@ -260,7 +285,8 @@ def extract_source_data(html_content, review_url):
 
     for key, (pattern, cleaner_func) in parsing_patterns.items():
         m = re.search(pattern, text_content, re.IGNORECASE)
-        if m: raw_data[key] = cleaner_func(m.group(1))
+        if m:
+            raw_data[key] = cleaner_func(m.group(1))
 
     src_match = re.search(r'Source:\s*([^\n]+)', text_content, re.IGNORECASE)
     if src_match:
@@ -269,18 +295,21 @@ def extract_source_data(html_content, review_url):
         for p in entry_content.find_all(['p', 'div']):
             if p.get_text(strip=True).lower().startswith("source:"):
                 a_tag = p.find('a', href=True)
-                if a_tag: raw_data["Source"] = clean_domain(a_tag['href'])
+                if a_tag:
+                    raw_data["Source"] = clean_domain(a_tag['href'])
                 break
 
     upd_match = re.search(r'Last Updated on ([a-zA-Z]+ \d{1,2}, \d{4})', text_content, re.IGNORECASE)
-    if upd_match: raw_data["Updated"] = upd_match.group(1)
+    if upd_match:
+        raw_data["Updated"] = upd_match.group(1)
 
     for img in entry_content.find_all('img'):
         alt = img.get('alt', '').lower()
         if "factual reporting:" in alt and not raw_data.get("Factuality"):
             fm = re.search(r'factual reporting:\s*([^-]+)', alt, re.IGNORECASE)
-            if fm: raw_data["Factuality"] = clean_factuality(fm.group(1))
-        
+            if fm:
+                raw_data["Factuality"] = clean_factuality(fm.group(1))
+
         if not raw_data.get("Bias"):
             if "extreme left" in alt: raw_data["Bias"] = "Extreme Left"
             elif "extreme right" in alt: raw_data["Bias"] = "Extreme Right"
@@ -296,34 +325,34 @@ def extract_source_data(html_content, review_url):
 
     return raw_data
 
-# --- MASTER APP ROUTING PROCESS ---
 
+# --- MASTER PROCESS ---
 def main():
-    global global_db, SHUTDOWN_REQUESTED, SAVING_IN_PROGRESS
+    global global_db, master_totals, SHUTDOWN_REQUESTED
     init_files()
     session = get_robust_session()
     global_db = load_db()
 
     scraped_dates_lookup = {
-        src['Review']: src.get('Checked', '1970-01-01T00:00:00Z') 
+        src['Review']: src.get('Checked', '1970-01-01T00:00:00Z')
         for srcs in global_db.values() for src in srcs if isinstance(src, dict) and 'Review' in src
     }
 
     print("Fetching Target Master Lists from Directory...\n", flush=True)
-    master_links_lookup = {}  
-    pending_tasks = {cat:[] for cat in CATEGORIES.values()}
-    master_totals = {cat: 0 for cat in CATEGORIES.values()}  # Stores true grand total of expected sources
+    master_links_lookup = {}
+    pending_tasks = {cat: [] for cat in CATEGORIES.values()}
+    master_totals = {cat: 0 for cat in CATEGORIES.values()}
 
     try:
         for url, cat_name in CATEGORIES.items():
-            if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS):
-                break # Ensure category fetching loop immediately exits on cancel
+            if SHUTDOWN_REQUESTED:
+                break
             try:
                 r = session.get(url, timeout=15)
                 soup = BeautifulSoup(r.text, 'html.parser')
-                raw_links =[]
+                raw_links = []
                 mbfc_table = soup.find('table', id='mbfc-table')
-                
+
                 if mbfc_table:
                     raw_links = mbfc_table.find_all('a', href=True)
                 else:
@@ -331,13 +360,17 @@ def main():
                     if entry:
                         collecting = False
                         for element in entry.children:
-                            if element.name is None: continue
+                            if element.name is None:
+                                continue
                             text = element.get_text()
                             if "Click the links below" in text:
-                                collecting = True; continue
-                            if "class" in element.attrs and "post-modified-info" in element.attrs.get("class",[]): break
-                            if collecting: raw_links.extend(element.find_all('a', href=True))
-                
+                                collecting = True
+                                continue
+                            if "class" in element.attrs and "post-modified-info" in element.attrs.get("class", []):
+                                break
+                            if collecting:
+                                raw_links.extend(element.find_all('a', href=True))
+
                 unique_for_cat = set()
                 for a in raw_links:
                     href = a['href'].strip()
@@ -345,9 +378,9 @@ def main():
                     if ('mediabiasfactcheck.com' in href or href.startswith('/')) and path_seg not in EXCLUDED_PATHS:
                         unique_for_cat.add(href)
                         master_links_lookup[href] = cat_name
-                        
-                master_totals[cat_name] = len(unique_for_cat)  # Log true expected count
-                
+
+                master_totals[cat_name] = len(unique_for_cat)
+
                 for link in sorted(unique_for_cat):
                     if link not in scraped_dates_lookup:
                         pending_tasks[cat_name].append(link)
@@ -357,6 +390,9 @@ def main():
 
             except Exception as e:
                 print(f"[ERR] Failed fetching category ({cat_name}): {e}", flush=True)
+
+        if SHUTDOWN_REQUESTED:
+            return
 
         total_pending = sum(len(urls) for urls in pending_tasks.values())
         execution_groups = {}
@@ -369,8 +405,7 @@ def main():
         else:
             BATCH_UPDATE_COUNT = 400
             print(f"\n[INFO] Database is up to date. Reassessing the {BATCH_UPDATE_COUNT} oldest records.\n", flush=True)
-            active_in_db =[u for u in scraped_dates_lookup.keys() if u in master_links_lookup]
-            
+            active_in_db = [u for u in scraped_dates_lookup.keys() if u in master_links_lookup]
             oldest_ranked = sorted(active_in_db, key=lambda u: (scraped_dates_lookup[u], u))[:BATCH_UPDATE_COUNT]
 
             for cat in CATEGORIES.values():
@@ -381,30 +416,32 @@ def main():
         urls_processed_this_run = 0
 
         for cat_name, urls in execution_groups.items():
-            if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS):
-                break # Ensure the outer loops also fully break so iterations completely stop
-            
-            if not urls: continue
+            if not urls:
+                continue
+            if SHUTDOWN_REQUESTED:
+                break
             cat_total = len(urls)
-            
+
             print(f"\n--- Category: {cat_name} ({cat_total} entries) ---", flush=True)
 
             for idx, href in enumerate(urls, 1):
                 if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS):
-                     print(f"\n[!] Session ending organically. Saving progress...", flush=True)
-                     break
-                    
+                    print(f"\n[!] Session ending. Saving progress...", flush=True)
+                    break
+
                 try:
                     r = session.get(href, timeout=6)
                     if r.status_code == 200:
                         for check_cat in list(global_db.keys()):
-                            global_db[check_cat] = [s for s in global_db[check_cat] if isinstance(s, dict) and s.get('Review') != href]
-                        
+                            global_db[check_cat] = [
+                                s for s in global_db[check_cat]
+                                if isinstance(s, dict) and s.get('Review') != href
+                            ]
+
                         new_data_pkg = extract_source_data(r.text, href)
                         global_db[cat_name].append(new_data_pkg)
 
                         p = [f"[{idx}/{cat_total}] [✓] {new_data_pkg.get('Name', 'Null Trace')[:65]}"]
-                        
                         if new_data_pkg.get('Bias'): p.append(f"B: {new_data_pkg['Bias']}")
                         if new_data_pkg.get('Factuality'): p.append(f"F: {new_data_pkg['Factuality']}")
                         if new_data_pkg.get('Credibility'): p.append(f"C: {new_data_pkg['Credibility']}")
@@ -413,48 +450,55 @@ def main():
                         if new_data_pkg.get('Type'): p.append(f"Type: {new_data_pkg['Type']}")
                         if new_data_pkg.get('Country'): p.append(f"Country: {new_data_pkg['Country']}")
                         if new_data_pkg.get('Reasoning'): p.append(f"Rsn: {new_data_pkg['Reasoning']}")
-                        
                         print(" | ".join(p), flush=True)
 
                     elif r.status_code == 404:
-                         print(f"[{idx}/{cat_total}] [!] 404 Not Found. Skipping.", flush=True)
-                    
-                    urls_processed_this_run += 1
-                    if urls_processed_this_run % 15 == 0:
-                         save_db(global_db)
-                         generate_statistics(global_db, master_totals)
+                        print(f"[{idx}/{cat_total}] [!] 404 Not Found. Skipping.", flush=True)
 
-                    # --- PRO-LEVEL EVASION: "The Coffee Break" ---
+                    urls_processed_this_run += 1
+
+                    # FIX 4: Save after EVERY processed entry — not every 15
+                    save_db(global_db)
+
+                    # Generate stats every 10 entries (lightweight cadence)
+                    if urls_processed_this_run % 10 == 0:
+                        generate_statistics(global_db, master_totals)
+                        print(f"[SAVE] Checkpoint: {urls_processed_this_run} entries persisted to disk.", flush=True)
+
+                    # Anti-bot cooldown
                     if urls_processed_this_run % 250 == 0:
-                         cooldown = random.uniform(45.0, 75.0)
-                         print(f"\n[~] Anti-Bot Cooldown: Pausing for {int(cooldown)} seconds...", flush=True)
-                         # Chunking the sleep allows it to be broken gracefully instantly on cancellation
-                         for _ in range(int(cooldown * 2)):
-                             if SHUTDOWN_REQUESTED: break
-                             time.sleep(0.5)
+                        cooldown = random.uniform(45.0, 75.0)
+                        print(f"\n[~] Anti-Bot Cooldown: Pausing for {int(cooldown)} seconds...", flush=True)
+                        time.sleep(cooldown)
 
                 except Exception as e:
                     print(f"[{idx}/{cat_total}] [X] Network Error: {e}", flush=True)
 
-                if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS): 
-                     break
+                if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS):
+                    break
 
-                # HUMAN JITTER: Broken into micro-sleeps for instantaneous reaction to cancellations
-                jitter = random.uniform(1.3, 2.4)
-                for _ in range(int(jitter * 10)):
-                    if SHUTDOWN_REQUESTED: break
-                    time.sleep(0.1)
+                time.sleep(random.uniform(1.3, 2.4))
 
     except KeyboardInterrupt:
-        print("\n[!] Process safely interrupted by user.", flush=True)
+        print("\n[!] Process interrupted by user.", flush=True)
     except Exception as e:
         print(f"\n[!] Unexpected error during execution: {e}", flush=True)
         traceback.print_exc()
     finally:
-        SAVING_IN_PROGRESS = True # Secures save functionality from overlapping force quit signals
-        print("\n[OK] Processing complete. Saving database and generating statistics.", flush=True)
+        # FIX 5: Final save with verification — acts as safety net
+        print("\n[OK] Processing complete. Final save...", flush=True)
         save_db(global_db)
         generate_statistics(global_db, master_totals)
+
+        # Verify files were actually written
+        for fname in [DB_FILE, STATS_FILE]:
+            if os.path.exists(fname):
+                size = os.path.getsize(fname)
+                mtime = datetime.fromtimestamp(os.path.getmtime(fname)).strftime('%H:%M:%S')
+                print(f"  ✓ {fname}: {size:,} bytes (modified {mtime})", flush=True)
+            else:
+                print(f"  ✗ {fname}: FILE MISSING", flush=True)
+
 
 if __name__ == "__main__":
     main()
