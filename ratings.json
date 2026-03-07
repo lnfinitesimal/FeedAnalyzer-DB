@@ -1,0 +1,126 @@
+{
+    "Left": [],
+    "Left-Center": [],
+    "Center": [],
+    "Right-Center": [],
+    "Right": [],
+    "Pro-Science": [],
+    "Fake News": [],
+    "Conspiracy": [],
+    "Satire": [
+        {
+            "Name": "Alternative Facts",
+            "Review URL": "https://mediabiasfactcheck.com/alternative-facts/",
+            "Category": "Satire",
+            "Domain/Source": "alternativelyfacts.com",
+            "Media Type": "Website",
+            "Traffic/Popularity": "Minimal",
+            "Bias": "Satire",
+            "Freedom": "Mostly Free",
+            "Country": "USA",
+            "Last Updated": "October 20, 2023"
+        },
+        {
+            "Name": "Alternative Science",
+            "Review URL": "https://mediabiasfactcheck.com/alternative-science/",
+            "Category": "Satire",
+            "Domain/Source": "alternative-science.com",
+            "Bias": "Satire",
+            "Freedom": "RSF 48/180",
+            "Country": "USA",
+            "Last Updated": "September 18, 2024"
+        },
+        {
+            "Name": "Babylon Bee",
+            "Review URL": "https://mediabiasfactcheck.com/babylon-bee/",
+            "Category": "Satire",
+            "Domain/Source": "babylonbee.com",
+            "Media Type": "Website",
+            "Traffic/Popularity": "High",
+            "Bias": "Right-Satire",
+            "Freedom": "Mostly Free",
+            "Country": "USA",
+            "Last Updated": "November 27, 2024"
+        },
+        {
+            "Name": "Blue News Network (BNN)",
+            "Review URL": "https://mediabiasfactcheck.com/blue-news-network-bnn/",
+            "Category": "Satire",
+            "Domain/Source": "bluenewsnetwork.com",
+            "Bias": "Right",
+            "Freedom": "RSF 48/180",
+            "Country": "USA",
+            "Last Updated": "May 15, 2023"
+        },
+        {
+            "Name": "Borowitz Report",
+            "Review URL": "https://mediabiasfactcheck.com/borowitz-report/",
+            "Category": "Satire",
+            "Domain/Source": "newyorker.com/humor/borowitz-report",
+            "Media Type": "Magazine",
+            "Traffic/Popularity": "High",
+            "Bias": "Left-Satire",
+            "Freedom": "Mostly Free",
+            "Country": "USA",
+            "Last Updated": "May 15, 2023"
+        },
+        {
+            "Name": "Burrard Street Journal",
+            "Review URL": "https://mediabiasfactcheck.com/burrard-street-journal/",
+            "Category": "Satire",
+            "Domain/Source": "burrardstreetjournal.com",
+            "Media Type": "Website",
+            "Traffic/Popularity": "Minimal",
+            "Bias": "Satire",
+            "Freedom": "Excellent",
+            "Country": "Canada",
+            "Last Updated": "December 25, 2023"
+        },
+        {
+            "Name": "Clickhole",
+            "Review URL": "https://mediabiasfactcheck.com/clickhole/",
+            "Category": "Satire",
+            "Domain/Source": "clickhole.com",
+            "Media Type": "Website",
+            "Traffic/Popularity": "Medium",
+            "Bias": "Satire",
+            "Freedom": "Mostly Free",
+            "Country": "USA",
+            "Last Updated": "January 26, 2024"
+        },
+        {
+            "Name": "Confederacy of Drones",
+            "Review URL": "https://mediabiasfactcheck.com/confederacy-of-drones/",
+            "Category": "Satire",
+            "Domain/Source": "confederacyofdrones.com",
+            "Bias": "Right",
+            "Freedom": "RSF 48/180",
+            "Country": "USA",
+            "Last Updated": "March 13, 2024"
+        },
+        {
+            "Name": "Cracked.com",
+            "Review URL": "https://mediabiasfactcheck.com/cracked/",
+            "Category": "Satire",
+            "Domain/Source": "cracked.com",
+            "Media Type": "Website",
+            "Traffic/Popularity": "High",
+            "Bias": "Left Leaning Satire",
+            "Freedom": "Mostly Free",
+            "Country": "USA",
+            "Last Updated": "April 19, 2024"
+        },
+        {
+            "Name": "The Adobo Chronicles",
+            "Review URL": "https://mediabiasfactcheck.com/the-adobo-chronicles/",
+            "Category": "Satire",
+            "Domain/Source": "adobochronicles.com",
+            "Media Type": "Website",
+            "Traffic/Popularity": "Minimal",
+            "Bias": "Satire",
+            "Freedom": "Mostly Free",
+            "Country": "USA",
+            "Last Updated": "October 4, 2023"
+        }
+    ]
+}
