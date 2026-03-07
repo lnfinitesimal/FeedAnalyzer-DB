@@ -325,16 +325,24 @@ def main():
                 if r.status_code == 404:
                     print(f"[WARN] 404 Not Found (Skipping): {href}")
                     continue
-                    
+                
                 source_data = extract_source_data(r.text, href, cat_name)
                 db[cat_name].append(source_data)
                 urls_processed_this_run += 1
                 
-                # The sleek logging format
-                name = source_data.get('Name', 'Unknown')
-                bias = source_data.get('Bias', 'N/A')
-                fact = source_data.get('Factuality', 'N/A')
-                print(f"[OK] {name} | B: {bias} | F: {fact}")
+                # --- The Sleek Logging Format ---
+                log_parts = [f"[✓] {source_data.get('Name', 'Unknown')}"]
+                
+                if 'Bias' in source_data: log_parts.append(f"B: {source_data['Bias']}")
+                if 'Factuality' in source_data: log_parts.append(f"F: {source_data['Factuality']}")
+                if 'Credibility' in source_data: log_parts.append(f"C: {source_data['Credibility']}")
+                if 'Freedom' in source_data: log_parts.append(f"FR: {source_data['Freedom']}")
+                if 'Traffic/Popularity' in source_data: log_parts.append(f"T: {source_data['Traffic/Popularity']}")
+                if 'Media Type' in source_data: log_parts.append(f"Media: {source_data['Media Type']}")
+                if 'Country' in source_data: log_parts.append(f"Ctry: {source_data['Country']}")
+                if 'Reasoning' in source_data: log_parts.append(f"Rsn: {source_data['Reasoning']}")
+                
+                print(" | ".join(log_parts), flush=True)
                 
                 # Incremental Save every 25 successful pulls to guarantee no data loss
                 if urls_processed_this_run % 25 == 0:
