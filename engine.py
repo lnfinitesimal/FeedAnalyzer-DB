@@ -10,7 +10,7 @@ import signal
 import sys
 from datetime import datetime
 import traceback
-import random  # Added for Human Jitter
+import random
 
 # --- CONFIGURATION ---
 DB_FILE = 'ratings.json'
