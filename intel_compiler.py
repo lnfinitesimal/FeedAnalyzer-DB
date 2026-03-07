@@ -287,7 +287,6 @@ def normalize_country(raw):
     except LookupError:
         pass
 
-    # Also try the uppercased form (handles "GERMANY" etc.)
     try:
         country = pycountry.countries.lookup(truncated.strip())
         return _PYCOUNTRY_OVERRIDES.get(country.name, country.name)
@@ -299,7 +298,6 @@ def normalize_country(raw):
     if cosmetic in _KNOWN_COUNTRIES:
         return cosmetic
 
-    # Unknown — return None instead of guessing
     return None
 
 
@@ -422,12 +420,55 @@ def truncate_dom(soup):
 # ── Line-isolated metric extraction ────────────────────────────────────────
 _MAX_RATING_LINE = 120  # structured rating lines are always short
 
+# Headings that contain structured data — keep collecting past these
+_DATA_HEADINGS = {"detailed report", "rating information", "ratings"}
+
+# Headings that signal analysis prose — stop collecting
+_PROSE_HEADINGS = {
+    "analysis", "reasoning", "analysis / reasoning", "analysis/reasoning",
+    "history", "funded by", "funding", "editorial review",
+    "see also", "related sources", "latest ratings", "failed fact checks",
+    "overall", "verdict", "summary",
+}
+
+
+def _info_box_lines(content):
+    """Return text lines from the structured-data region of entry-content.
+
+    Includes everything ABOVE the first heading, plus everything BELOW
+    any 'Detailed Report' heading — but stops at headings that signal
+    the start of analysis prose (Analysis, Reasoning, History, etc.).
+
+    This handles both MBFC page formats:
+      Format A: structured data → <h2>Detailed Report</h2> → analysis
+      Format B: <h2>Detailed Report</h2> → structured data → <h2>Analysis</h2>
+    """
+    pieces = []
+    for child in content.children:
+        if hasattr(child, "name") and child.name in ("h2", "h3", "h4", "h5"):
+            heading_text = child.get_text(strip=True).lower().strip()
+            # "Detailed Report" etc. CONTAIN structured data — skip heading, keep going
+            if any(dh in heading_text for dh in _DATA_HEADINGS):
+                continue
+            # Known prose heading — stop
+            if any(ph in heading_text for ph in _PROSE_HEADINGS):
+                break
+            # Unknown heading — stop conservatively
+            break
+        text = (child.get_text(separator="\n", strip=True)
+                if hasattr(child, "get_text")
+                else str(child).strip())
+        if text:
+            pieces.extend(text.split("\n"))
+    return pieces
+
 
 def _extract_metric_linewise(lines, label_re, whitelist=None):
     """Scan lines top → bottom for a 'Label: VALUE' pattern.
 
     Guards against false positives from analysis prose:
       • re.match  — label must appear at (or very near) the start of the line
+      • MBFC prefix — handles 'MBFC's Country Freedom Rating' etc.
       • length cap — paragraph sentences are always longer than rating lines
       • first-match-wins — the structured info box is above the analysis
     """
@@ -437,6 +478,7 @@ def _extract_metric_linewise(lines, label_re, whitelist=None):
             continue
         m = re.match(
             r"(?:[\u2022\-•*]\s*)?"       # optional bullet
+            r"(?:MBFC'?s?\s+)?"            # optional "MBFC's" prefix
             + label_re
             + r"\s*[:\-–—]\s*(.+?)\.?\s*$",
             line, re.I,
@@ -456,26 +498,6 @@ def _extract_metric_linewise(lines, label_re, whitelist=None):
         if len(val) <= 40:
             return val.title()
     return None
-
-
-def _info_box_lines(content):
-    """Return text lines from the 'info-box' region of entry-content —
-    everything above the first <h2>–<h5> heading.
-
-    On MBFC pages the structured ratings (Factual Reporting, Credibility,
-    etc.) always appear in this region; the analytical prose that can
-    cause false positives lives below the first heading."""
-    pieces = []
-    for child in content.children:
-        # Stop at the first heading — analysis section begins
-        if hasattr(child, "name") and child.name in ("h2", "h3", "h4", "h5"):
-            break
-        text = (child.get_text(separator="\n", strip=True)
-                if hasattr(child, "get_text")
-                else str(child).strip())
-        if text:
-            pieces.extend(text.split("\n"))
-    return pieces
 
 
 # ── Bias extraction from page ──────────────────────────────────────────────
@@ -548,15 +570,15 @@ def extract_page_bias(soup):
 def scrape_metrics(soup):
     """Extract metrics using a two-phase line-isolated search.
 
-    Phase 1 — Info-box region (above the first heading):
-        Structured 'Label: VALUE' lines live here.  High confidence.
+    Phase 1 — Info-box region (above first prose heading, through
+        'Detailed Report'): Structured 'Label: VALUE' lines live here.
 
-    Phase 2 — Full page (fallback):
-        Still line-isolated (re.match + length cap), but allows pages
-        with unusual formatting to be parsed.
+    Phase 2 — Full page (fallback, except country which is info-only):
+        Still line-isolated (re.match + length cap + MBFC prefix),
+        but allows pages with unusual formatting to be parsed.
 
     Phase 3 — Image alt-tags (last resort):
-        Only the first 15 images are checked (info-box region).
+        Only the first 15 images are checked.
     """
     content = soup.find("div", class_="entry-content")
     if not content:
@@ -567,7 +589,7 @@ def scrape_metrics(soup):
     info_lines = _info_box_lines(content)
 
     def extract(label_re, whitelist=None, info_only=False):
-        # Priority: info box (above first heading)
+        # Priority: info box (structured data region)
         result = _extract_metric_linewise(info_lines, label_re, whitelist)
         if result:
             return result
@@ -581,7 +603,7 @@ def scrape_metrics(soup):
             r"(?:Factual Reporting|Factuality Rating|Factuality|Factual Report)",
             VALID_FACTUALITY),
         "c": extract(
-            r"(?:MBFC'?s?\s+Credibility\s+Rating|Credibility\s+Rating)",
+            r"Credibility\s+Rating",
             VALID_CREDIBILITY),
         "p": extract(
             r"(?:Country Freedom (?:Rating|Rank)|Press Freedom (?:Rating|Rank)"
@@ -652,8 +674,7 @@ def extract_source_key(soup):
             if key and dom and not _is_blacklisted(dom) and len(dom) > 3:
                 return key
 
-        # Priority 3: bare domain / (dot) notation → normalize through
-        #             source_key_from_url for consistent subdomain stripping
+        # Priority 3: bare domain / (dot) notation
         m = re.search(r":\s*(.+)", el_text)
         if m:
             raw = m.group(1).strip()
@@ -666,10 +687,9 @@ def extract_source_key(soup):
                     return key
 
     # ── Priority 4: Most-linked external domain (fallback) ──
-    # Use truncated content to exclude "Related Sources" / "See Also"
     scan_region = truncate_dom(soup) or content
     domain_counts = Counter()
-    domain_best_key = {}     # domain → shortest (most canonical) key seen
+    domain_best_key = {}
 
     for a in scan_region.find_all("a", href=True):
         href = a["href"].strip()
@@ -682,13 +702,12 @@ def extract_source_key(soup):
         if not dom or _is_blacklisted(dom) or len(dom) <= 3:
             continue
         domain_counts[dom] += 1
-        # Prefer the root-domain key (shortest) for this domain
         if dom not in domain_best_key or len(key) < len(domain_best_key[dom]):
             domain_best_key[dom] = key
 
     if domain_counts:
         best_dom, best_count = domain_counts.most_common(1)[0]
-        if best_count >= 2:    # require ≥2 links for confidence
+        if best_count >= 2:
             return domain_best_key[best_dom]
 
     return None
@@ -802,21 +821,14 @@ def migrate_fail_keys(db):
 
 
 def migrate_subdomain_keys(db):
-    """Re-normalize all keys to collapse trivial-subdomain variants.
-
-    e.g. mobile.reuters.com → reuters.com
-         amp.cnn.com        → cnn.com
-         edition.cnn.com    → cnn.com  (merges with above if both exist)
-    """
+    """Re-normalize all keys to collapse trivial-subdomain variants."""
     rekeyed = 0
     for old_key in list(db):
         if old_key.startswith("_fail:"):
             continue
-        # Re-derive canonical key through current normalization
         new_key = source_key_from_url(f"https://{old_key}")
         if not new_key or new_key == old_key:
             continue
-        # Merge: keep the entry with the most recent check
         if new_key in db:
             if db[old_key].get("chk", 0) > db[new_key].get("chk", 0):
                 db[new_key] = db[old_key]
@@ -870,7 +882,6 @@ def harvest_all(db, failures):
 
     now = int(time.time())
 
-    # Build reverse index: MBFC URL → source key (from existing DB)
     url_to_key = {}
     for key, entry in db.items():
         if not key.startswith("_fail:") and "u" in entry:
@@ -879,8 +890,7 @@ def harvest_all(db, failures):
     endpoints = list(TARGET_ENDPOINTS.items())
     random.shuffle(endpoints)
 
-    # ── Scrape every category listing ──
-    raw_harvest = {}  # bias_name → [mbfc_url, ...]
+    raw_harvest = {}
     for endpoint_url, bias_name in endpoints:
         if http.should_stop:
             print("  [!] Circuit breaker — stopping harvest")
@@ -895,9 +905,7 @@ def harvest_all(db, failures):
     if not any(raw_harvest.values()):
         return {}, url_to_key
 
-    # ── Cross-reference against DB → classify every URL ──
-    categories = {}  # bias_name → {"new": [], "stale": [], "fresh": int, "dead": int}
-
+    categories = {}
     grand_harvested = grand_fresh = grand_new = grand_stale = grand_dead = 0
 
     for bias_name, urls in raw_harvest.items():
@@ -905,7 +913,6 @@ def harvest_all(db, failures):
         new_list, stale_list = [], []
 
         for u in urls:
-            # Check permanent failures first
             if failures.get(u, {}).get("fails", 0) >= FAIL_MAX:
                 dead += 1
                 continue
@@ -915,17 +922,12 @@ def harvest_all(db, failures):
                 entry = db[k]
                 if entry.get("chk", 0) > now - RECHECK:
                     fresh += 1
-                    # NOTE: Do NOT overwrite bias here.  The harvest
-                    # category is unreliable (Related-Source links cause
-                    # cross-category leakage).  Page-level extraction
-                    # in Phase 2 is authoritative; fresh entries keep
-                    # their verified bias until the next recheck.
+                    # Do NOT overwrite bias from harvest category —
+                    # page-level extraction in Phase 2 is authoritative
                 else:
-                    # Stale — needs re-scrape
                     stale += 1
                     stale_list.append(u)
             else:
-                # Never seen
                 new += 1
                 new_list.append(u)
 
@@ -942,7 +944,6 @@ def harvest_all(db, failures):
         grand_stale += stale
         grand_dead += dead
 
-    # ── Print harvest summary ──
     print(f"\n  {'─' * 60}")
     print(f"  {'Category':<20s} {'Total':>6s} {'Fresh':>6s} {'New':>6s} {'Stale':>6s} {'Dead':>6s} {'Todo':>6s}")
     print(f"  {'─' * 60}")
@@ -975,7 +976,6 @@ def process_category(db, bias_name, todo_urls, url_to_key, failures):
     """Process a single category's pending URLs (new first, then stale by age)."""
     now = int(time.time())
 
-    # Sort: new (no key → tuple(0,0)) first, then stale by oldest check
     def sort_key(u):
         k = url_to_key.get(u)
         if not k:
@@ -1008,7 +1008,6 @@ def process_category(db, bias_name, todo_urls, url_to_key, failures):
         source_key = known_key if known_key else extract_source_key(soup)
 
         if not source_key:
-            # Track failure in separate dict — never in main DB
             fail_entry = failures.setdefault(url, {"chk": 0, "fails": 0})
             fail_entry["fails"] += 1
             fail_entry["chk"] = now
@@ -1019,7 +1018,6 @@ def process_category(db, bias_name, todo_urls, url_to_key, failures):
                 save_failures(failures)
             continue
         else:
-            # Source key found — clear any prior failure record
             failures.pop(url, None)
 
         if source_key in processed_keys:
@@ -1064,7 +1062,6 @@ def process_category(db, bias_name, todo_urls, url_to_key, failures):
         if i % 25 == 0:
             save_database(db)
 
-    # Final status
     done = i if not (http.should_stop or time_remaining() < 300) else i - 1
     remaining = total - done
     if remaining > 0:
@@ -1078,17 +1075,15 @@ def process_category(db, bias_name, todo_urls, url_to_key, failures):
 
 
 def process_all(db, categories, url_to_key, failures):
-    """Process categories ordered by smallest pending count first,
-    so small categories finish quickly and progress is maximised."""
+    """Process categories ordered by smallest pending count first."""
 
     print("\n╔══════════════════════════════════════════════════════════════╗")
     print("║         PHASE 2 · PROCESSING (smallest pending first)      ║")
     print("╚══════════════════════════════════════════════════════════════╝")
 
-    # Build ordered list: (bias_name, [todo_urls]) sorted by pending count
     cat_queue = []
     for bias_name, info in categories.items():
-        todo = info["new"] + info["stale"]  # new first in the list already
+        todo = info["new"] + info["stale"]
         if todo:
             cat_queue.append((bias_name, todo))
 
@@ -1124,7 +1119,6 @@ def process_all(db, categories, url_to_key, failures):
         save_database(db)
         save_failures(failures)
 
-        # Inter-category cooldown (skip if last or stopping)
         if time_remaining() > 300 and not http.should_stop and cat_idx < len(cat_queue) - 1:
             cd = random.uniform(30, 50)
             print(f"  [zZz] Inter-category pause ({cd:.0f}s)")
@@ -1140,9 +1134,9 @@ def main():
     db = load_database()
 
     # ── One-time migrations ──
-    failures = migrate_fail_keys(db)       # _fail: keys → failures.json
-    migrate_subdomain_keys(db)             # mobile.x.com → x.com
-    save_database(db)                      # persist migrations + initial stats
+    failures = migrate_fail_keys(db)
+    migrate_subdomain_keys(db)
+    save_database(db)
 
     if not http.warmup():
         return
