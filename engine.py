@@ -13,14 +13,15 @@ import traceback
 import random
 
 # --- CONFIGURATION ---
+
 DB_FILE = 'ratings.json'
 STATS_FILE = 'statistics.md'
 MAX_RUNTIME_SECONDS = 14400  # 4 hours timeout limit for Actions
 START_TIME = time.time()
 
 global_db = {}
-master_totals = {}  # FIX: Made global so the emergency shutdown handler can access it
 SHUTDOWN_REQUESTED = False
+SAVING_IN_PROGRESS = False
 
 CATEGORIES = {
     "https://mediabiasfactcheck.com/left/": "Left",
@@ -35,14 +36,15 @@ CATEGORIES = {
 }
 
 EXCLUDED_PATHS = {
-    'membership-account', 'support-media-bias-fact-check', 'filtered-search', 
+    'membership-account', 'support-media-bias-fact-check', 'filtered-search',
     'whats-new-recently-added-sources-and-pages', 'left-vs-right-bias-how-we-rate-the-bias-of-media-sources',
-    'about', 'methodology', 'contact', 'faq', 'donate', 'funding', 'submit-source', 
+    'about', 'methodology', 'contact', 'faq', 'donate', 'funding', 'submit-source',
     'pseudoscience-dictionary', 're-evaluated-sources', 'changes-corrections', 'help-us-fact-check',
     'left', 'leftcenter', 'center', 'right-center', 'right', 'pro-science', 'fake-news', 'conspiracy', 'satire'
 }
 
 # --- IO / FILE SETUP ---
+
 def init_files():
     if not os.path.exists(DB_FILE):
         with open(DB_FILE, 'w', encoding='utf-8') as f:
@@ -52,19 +54,20 @@ def init_files():
             f.write("# MBFC Database Statistics\n\nInitializing...\n")
 
 def request_shutdown(signum, frame):
-    global SHUTDOWN_REQUESTED, global_db, master_totals
+    global SHUTDOWN_REQUESTED
     if not SHUTDOWN_REQUESTED:
-        print(f"\n[!] Cancellation requested. Emergency saving data to prevent loss...", flush=True)
+        print(f"\n[!] Cancellation requested. Finishing the current URL gracefully, then saving data...", flush=True)
         SHUTDOWN_REQUESTED = True
-        # FIX: Instantly save data upon cancellation to beat GitHub's 7.5 second kill timer
-        try:
-            save_db(global_db)
-            generate_statistics(global_db, master_totals)
-        except Exception as e:
-            pass
+
+def force_shutdown(signum, frame):
+    global SAVING_IN_PROGRESS
+    if SAVING_IN_PROGRESS:
+        return # Ignore kill signals if we are already safely in the process of saving to disk
+    print(f"\n[!] Grace period expired (SIGTERM). Interrupting network/sleep immediately to save data...", flush=True)
+    raise KeyboardInterrupt
 
 signal.signal(signal.SIGINT, request_shutdown)
-signal.signal(signal.SIGTERM, request_shutdown)
+signal.signal(signal.SIGTERM, force_shutdown)
 
 def get_robust_session():
     session = requests.Session()
@@ -79,10 +82,10 @@ def load_db():
         try:
             with open(DB_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                for req_cat in CATEGORIES.values():
-                    if req_cat not in data:
-                        data[req_cat] =[]
-                return data
+            for req_cat in CATEGORIES.values():
+                if req_cat not in data:
+                    data[req_cat] =[]
+            return data
         except json.JSONDecodeError:
             pass
     return {cat:[] for cat in CATEGORIES.values()}
@@ -92,7 +95,7 @@ def save_db(db):
     for category in ordered_db:
         if isinstance(ordered_db[category], list):
             ordered_db[category] = sorted(ordered_db[category], key=lambda x: str(x.get('Name', '')).lower())
-            
+
     # Atomic Save for Database
     temp_file = DB_FILE + '.tmp'
     with open(temp_file, 'w', encoding='utf-8') as f:
@@ -102,7 +105,7 @@ def save_db(db):
 def generate_statistics(db, master_totals=None):
     if master_totals is None:
         master_totals = {}
-        
+
     try:
         total = sum(len(srcs) for srcs in db.values() if isinstance(srcs, list))
         cat_counts = {cat: len(srcs) for cat, srcs in db.items() if isinstance(srcs, list)}
@@ -171,6 +174,7 @@ def generate_statistics(db, master_totals=None):
         print(f"\n[!] Error generating stats Markdown file: {e}", flush=True)
 
 # --- CLEANING TOOLS ---
+
 def clean_string(val):
     if not val: return None
     v = str(val).strip()
@@ -179,7 +183,7 @@ def clean_string(val):
 
 def clean_name(t):
     if not clean_string(t): return None
-    return re.sub(r'\s*[-–—]\s*Bias and Credibility.*$', '', t, flags=re.IGNORECASE).strip()
+    return re.sub(r'\s*[-–—]\sBias and Credibility.$', '', t, flags=re.IGNORECASE).strip()
 
 def clean_domain(u):
     u = clean_string(u)
@@ -191,15 +195,15 @@ def clean_domain(u):
 def clean_bias(t):
     t = clean_string(t)
     if not t: return None
-    t = re.sub(r'\([0-9.-]+\)', '', t) 
+    t = re.sub(r'([0-9.-]+)', '', t)
     t = re.sub(r'\bBIAS\b', '', t, flags=re.IGNORECASE)
-    t = re.sub(r'-\s+', '-', t) 
+    t = re.sub(r'-\s+', '-', t)
     return t.strip().title()
 
 def clean_factuality(t):
     t = clean_string(t)
     if not t: return None
-    return re.sub(r'\([0-9.-]+\)', '', t).strip().title()
+    return re.sub(r'([0-9.-]+)', '', t).strip().title()
 
 def clean_metric_standard(t):
     t = clean_string(t)
@@ -209,7 +213,7 @@ def clean_metric_standard(t):
 def clean_freedom(t):
     t = clean_string(t)
     if not t: return None
-    match = re.search(r'(\d+/\d+)', t) 
+    match = re.search(r'(\d+/\d+)', t)
     if match: return f"RSF {match.group(1)}"
     return t.title()
 
@@ -222,11 +226,11 @@ def get_clean_text(html_string):
     lines =[line.strip() for line in text.split('\n') if line.strip()]
     return '\n'.join(lines)
 
-
 # --- DATA EXTRACTION TARGETS ---
+
 def extract_source_data(html_content, review_url):
     soup = BeautifulSoup(html_content, 'html.parser')
-    
+
     raw_data = {
         "Name": None, "Review": review_url, "Source": None, "Type": None, 
         "Traffic": None, "Bias": None, "Reasoning": None, "Factuality": None, 
@@ -292,14 +296,14 @@ def extract_source_data(html_content, review_url):
 
     return raw_data
 
-
 # --- MASTER APP ROUTING PROCESS ---
+
 def main():
-    global global_db, SHUTDOWN_REQUESTED, master_totals
+    global global_db, SHUTDOWN_REQUESTED, SAVING_IN_PROGRESS
     init_files()
     session = get_robust_session()
     global_db = load_db()
-    
+
     scraped_dates_lookup = {
         src['Review']: src.get('Checked', '1970-01-01T00:00:00Z') 
         for srcs in global_db.values() for src in srcs if isinstance(src, dict) and 'Review' in src
@@ -308,10 +312,12 @@ def main():
     print("Fetching Target Master Lists from Directory...\n", flush=True)
     master_links_lookup = {}  
     pending_tasks = {cat:[] for cat in CATEGORIES.values()}
-    master_totals = {cat: 0 for cat in CATEGORIES.values()}  # FIX: Stores true grand total of expected sources
-    
+    master_totals = {cat: 0 for cat in CATEGORIES.values()}  # Stores true grand total of expected sources
+
     try:
         for url, cat_name in CATEGORIES.items():
+            if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS):
+                break # Ensure category fetching loop immediately exits on cancel
             try:
                 r = session.get(url, timeout=15)
                 soup = BeautifulSoup(r.text, 'html.parser')
@@ -342,7 +348,6 @@ def main():
                         
                 master_totals[cat_name] = len(unique_for_cat)  # Log true expected count
                 
-                # ALPHABETICAL FIX: sorted() restores alphabetical order naturally!
                 for link in sorted(unique_for_cat):
                     if link not in scraped_dates_lookup:
                         pending_tasks[cat_name].append(link)
@@ -366,17 +371,19 @@ def main():
             print(f"\n[INFO] Database is up to date. Reassessing the {BATCH_UPDATE_COUNT} oldest records.\n", flush=True)
             active_in_db =[u for u in scraped_dates_lookup.keys() if u in master_links_lookup]
             
-            # ALPHABETICAL TIE-BREAKER: Sorts by Date first, then falls back to Alphabetical URL to prevent randomness
             oldest_ranked = sorted(active_in_db, key=lambda u: (scraped_dates_lookup[u], u))[:BATCH_UPDATE_COUNT]
 
             for cat in CATEGORIES.values():
-                execution_groups[cat] =[]
+                execution_groups[cat] = []
             for old_href in oldest_ranked:
                 execution_groups[master_links_lookup[old_href]].append(old_href)
 
         urls_processed_this_run = 0
 
         for cat_name, urls in execution_groups.items():
+            if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS):
+                break # Ensure the outer loops also fully break so iterations completely stop
+            
             if not urls: continue
             cat_total = len(urls)
             
@@ -391,12 +398,12 @@ def main():
                     r = session.get(href, timeout=6)
                     if r.status_code == 200:
                         for check_cat in list(global_db.keys()):
-                            global_db[check_cat] =[s for s in global_db[check_cat] if isinstance(s, dict) and s.get('Review') != href]
+                            global_db[check_cat] = [s for s in global_db[check_cat] if isinstance(s, dict) and s.get('Review') != href]
                         
                         new_data_pkg = extract_source_data(r.text, href)
                         global_db[cat_name].append(new_data_pkg)
 
-                        p =[f"[{idx}/{cat_total}] [✓] {new_data_pkg.get('Name', 'Null Trace')[:65]}"]
+                        p = [f"[{idx}/{cat_total}] [✓] {new_data_pkg.get('Name', 'Null Trace')[:65]}"]
                         
                         if new_data_pkg.get('Bias'): p.append(f"B: {new_data_pkg['Bias']}")
                         if new_data_pkg.get('Factuality'): p.append(f"F: {new_data_pkg['Factuality']}")
@@ -415,31 +422,36 @@ def main():
                     urls_processed_this_run += 1
                     if urls_processed_this_run % 15 == 0:
                          save_db(global_db)
-                         # FIX 1: Generate stats concurrent with DB save, passing master_totals
                          generate_statistics(global_db, master_totals)
 
                     # --- PRO-LEVEL EVASION: "The Coffee Break" ---
                     if urls_processed_this_run % 250 == 0:
                          cooldown = random.uniform(45.0, 75.0)
                          print(f"\n[~] Anti-Bot Cooldown: Pausing for {int(cooldown)} seconds...", flush=True)
-                         time.sleep(cooldown)
+                         # Chunking the sleep allows it to be broken gracefully instantly on cancellation
+                         for _ in range(int(cooldown * 2)):
+                             if SHUTDOWN_REQUESTED: break
+                             time.sleep(0.5)
 
                 except Exception as e:
-                    print(f"[{idx}/{cat_total}][X] Network Error: {e}", flush=True)
+                    print(f"[{idx}/{cat_total}] [X] Network Error: {e}", flush=True)
 
-                # FIX 2: Moved up to check for shutdown BEFORE sleeping to beat GitHub's Kill Timer
                 if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS): 
                      break
 
-                # HUMAN JITTER: Randomized sleep interval to look completely human to Cloudflare
-                time.sleep(random.uniform(1.3, 2.4))
+                # HUMAN JITTER: Broken into micro-sleeps for instantaneous reaction to cancellations
+                jitter = random.uniform(1.3, 2.4)
+                for _ in range(int(jitter * 10)):
+                    if SHUTDOWN_REQUESTED: break
+                    time.sleep(0.1)
 
     except KeyboardInterrupt:
-        print("\n[!] Process interrupted by user.", flush=True)
+        print("\n[!] Process safely interrupted by user.", flush=True)
     except Exception as e:
         print(f"\n[!] Unexpected error during execution: {e}", flush=True)
         traceback.print_exc()
     finally:
+        SAVING_IN_PROGRESS = True # Secures save functionality from overlapping force quit signals
         print("\n[OK] Processing complete. Saving database and generating statistics.", flush=True)
         save_db(global_db)
         generate_statistics(global_db, master_totals)
