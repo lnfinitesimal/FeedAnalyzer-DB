@@ -1,1 +1,0 @@
-# MBFC Database Statistics
