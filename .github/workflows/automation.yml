@@ -2,7 +2,6 @@ name: DB Intel Automation
 
 on:
   schedule:
-    # Executes precisely on 6-hour bounds ensuring optimal anti-IP block continuity limits natively handled naturally 
     - cron: '0 0,6,12,18 * * *'
   workflow_dispatch:
 
@@ -16,7 +15,7 @@ permissions:
 jobs:
   compile-intel:
     runs-on: ubuntu-latest
-    timeout-minutes: 270 
+    timeout-minutes: 270
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -37,12 +36,27 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          echo "=== Pre-Commit File Diagnostics ==="
+          for f in ratings.json statistics.md; do
+            if [ -f "$f" ]; then
+              echo "  $f: $(wc -c < "$f") bytes, modified $(stat -c '%y' "$f")"
+            else
+              echo "  $f: NOT FOUND"
+            fi
+          done
+          echo "==================================="
+
           git add ratings.json statistics.md
+
           if git diff --staged --quiet; then
             echo "No changes detected. Workflow concluded seamlessly."
             exit 0
           else
-            git commit -m "System DB Autoupdate Complete"
+            CHANGES=$(git diff --staged --stat)
+            echo "Changes staged for commit:"
+            echo "$CHANGES"
+            git commit -m "System DB Autoupdate — $(date -u +'%Y-%m-%d %H:%M') UTC"
             git pull --rebase origin main
             git push
           fi
