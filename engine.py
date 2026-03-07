@@ -1,4 +1,3 @@
-import random
 import requests
 from requests.adapters import HTTPAdapter, Retry
 from bs4 import BeautifulSoup
@@ -11,6 +10,7 @@ import signal
 import sys
 from datetime import datetime
 import traceback
+import random  # Added for Human Jitter
 
 # --- CONFIGURATION ---
 DB_FILE = 'ratings.json'
@@ -319,7 +319,8 @@ def main():
                         unique_for_cat.add(href)
                         master_links_lookup[href] = cat_name
                         
-                for link in unique_for_cat:
+                # ALPHABETICAL FIX: sorted() restores alphabetical order naturally!
+                for link in sorted(unique_for_cat):
                     if link not in scraped_dates_lookup:
                         pending_tasks[cat_name].append(link)
 
@@ -338,11 +339,12 @@ def main():
             for cat, urllist in sorted(pending_filtered.items(), key=lambda i: len(i[1])):
                 execution_groups[cat] = urllist
         else:
-            # PERFECT BATCH SIZE ESTABLISHED HERE
             BATCH_UPDATE_COUNT = 400
             print(f"\n[INFO] Database is up to date. Reassessing the {BATCH_UPDATE_COUNT} oldest records.\n", flush=True)
             active_in_db =[u for u in scraped_dates_lookup.keys() if u in master_links_lookup]
-            oldest_ranked = sorted(active_in_db, key=lambda u: scraped_dates_lookup[u])[:BATCH_UPDATE_COUNT]
+            
+            # ALPHABETICAL TIE-BREAKER: Sorts by Date first, then falls back to Alphabetical URL to prevent randomness
+            oldest_ranked = sorted(active_in_db, key=lambda u: (scraped_dates_lookup[u], u))[:BATCH_UPDATE_COUNT]
 
             for cat in CATEGORIES.values():
                 execution_groups[cat] =[]
@@ -366,12 +368,12 @@ def main():
                     r = session.get(href, timeout=6)
                     if r.status_code == 200:
                         for check_cat in list(global_db.keys()):
-                            global_db[check_cat] = [s for s in global_db[check_cat] if isinstance(s, dict) and s.get('Review') != href]
+                            global_db[check_cat] =[s for s in global_db[check_cat] if isinstance(s, dict) and s.get('Review') != href]
                         
                         new_data_pkg = extract_source_data(r.text, href)
                         global_db[cat_name].append(new_data_pkg)
 
-                        p = [f"[{idx}/{cat_total}] [✓] {new_data_pkg.get('Name', 'Null Trace')[:65]}"]
+                        p =[f"[{idx}/{cat_total}] [✓] {new_data_pkg.get('Name', 'Null Trace')[:65]}"]
                         
                         if new_data_pkg.get('Bias'): p.append(f"B: {new_data_pkg['Bias']}")
                         if new_data_pkg.get('Factuality'): p.append(f"F: {new_data_pkg['Factuality']}")
@@ -394,7 +396,7 @@ def main():
                 except Exception as e:
                     print(f"[{idx}/{cat_total}] [X] Network Error: {e}", flush=True)
 
-                # Sleeps for a random time between 1.3 and 2.4 seconds to mimic human browsing
+                # HUMAN JITTER: Randomized sleep interval to look completely human to Cloudflare
                 time.sleep(random.uniform(1.3, 2.4))
 
             if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS): 
