@@ -2,12 +2,10 @@ name: DB Intel Automation
 
 on:
   schedule:
-    # Runs every 6 hours (00:00, 06:00, 12:00, 18:00 UTC)
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
 concurrency:
-  # Prevents overlapping runs. If a manual run starts, it waits for the scheduled one to finish (or vice versa).
   group: intel-automation
   cancel-in-progress: false
 
@@ -17,9 +15,7 @@ permissions:
 jobs:
   compile-intel:
     runs-on: ubuntu-latest
-    # GitHub limits jobs to 6 hours (360 mins). We set this to 355 to be safe.
-    # The python script itself will safely self-terminate at 345 minutes.
-    timeout-minutes: 355 
+    timeout-minutes: 355
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -30,28 +26,26 @@ jobs:
           python-version: '3.10'
 
       - name: Install Dependencies
-        # Using standard requests and beautifulsoup4. We will build the retry logic natively.
         run: pip install requests beautifulsoup4 urllib3
 
-      - name: Run Intel Compiler (engine.py)
-        # -u forces unbuffered output so you see logs instantly in the GitHub UI
+      - name: Run Intel Compiler
         run: python -u engine.py
 
-      - name: Commit Database & Stats
-        # always() ensures this runs EVEN IF you cancel the workflow manually!
-        if: always() 
+      - name: Commit Database
+        if: always()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Force add files to tracking
           git add ratings.json statistics.md
           
-          # Check if there are actually changes to commit
+          # Safely check for changes and commit
           if git diff --staged --quiet; then
             echo "No changes detected. Skipping commit."
             exit 0
           else
-            git commit -m "Auto-update: MBFC DB & Stats"
-            # Rebase ensures we don't get merge conflicts if another commit happened
+            git commit -m "Automated Intel DB update"
             git pull --rebase origin main
             git push
           fi
