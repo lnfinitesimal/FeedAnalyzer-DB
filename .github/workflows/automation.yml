@@ -2,7 +2,8 @@ name: DB Intel Automation
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    # Run safely 4 times a day perfectly under the cloudflare radar
+    - cron: '0 0,6,12,18 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -15,7 +16,8 @@ permissions:
 jobs:
   compile-intel:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    # Bumps the physical container time out 30 minutes beyond the Python script limits ensuring saves actually pass
+    timeout-minutes: 270 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -36,16 +38,12 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Force add files to tracking
           git add ratings.json statistics.md
-          
-          # Safely check for changes and commit
           if git diff --staged --quiet; then
-            echo "No changes detected. Skipping commit."
+            echo "No changes detected. Concluding run smoothly."
             exit 0
           else
-            git commit -m "Automated Intel DB update"
+            git commit -m "Auto-update: DB Integrations"
             git pull --rebase origin main
             git push
           fi
