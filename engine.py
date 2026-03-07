@@ -80,14 +80,16 @@ def load_db():
     return {cat:[] for cat in CATEGORIES.values()}
 
 def save_db(db):
-    # Enforces absolute sorting of the dictionary keys so categories never shift downwards
     ordered_db = {cat: db.get(cat,[]) for cat in CATEGORIES.values()}
     for category in ordered_db:
         if isinstance(ordered_db[category], list):
             ordered_db[category] = sorted(ordered_db[category], key=lambda x: str(x.get('Name', '')).lower())
             
-    with open(DB_FILE, 'w', encoding='utf-8') as f:
+    # Atomic Save for Database
+    temp_file = DB_FILE + '.tmp'
+    with open(temp_file, 'w', encoding='utf-8') as f:
         json.dump(ordered_db, f, indent=4, ensure_ascii=False)
+    os.replace(temp_file, DB_FILE)
 
 def generate_statistics(db, pending_counts=None):
     if pending_counts is None:
@@ -97,7 +99,6 @@ def generate_statistics(db, pending_counts=None):
         total = sum(len(srcs) for srcs in db.values() if isinstance(srcs, list))
         cat_counts = {cat: len(srcs) for cat, srcs in db.items() if isinstance(srcs, list)}
         
-        # Comprehensive tally dictionaries
         tallies = {
             'Bias': {}, 'Factuality': {}, 'Credibility': {}, 
             'Freedom': {}, 'Type': {}, 'Country': {}
@@ -139,8 +140,11 @@ def generate_statistics(db, pending_counts=None):
         md += make_table("Type", tallies['Type'])
         md += make_table("Country", tallies['Country'], top=15)
 
-        with open(STATS_FILE, 'w', encoding='utf-8') as f_out:
+        # Atomic Save for Statistics MD
+        temp_stats = STATS_FILE + '.tmp'
+        with open(temp_stats, 'w', encoding='utf-8') as f_out:
             f_out.write(md)
+        os.replace(temp_stats, STATS_FILE)
             
     except Exception as e:
         print(f"\n[!] Error generating stats Markdown file: {e}", flush=True)
@@ -194,7 +198,7 @@ def get_clean_text(html_string):
     soup = BeautifulSoup(s, 'html.parser')
     text = soup.get_text(separator=' ').replace('\xa0', ' ')
     text = re.sub(r' {2,}', ' ', text)
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    lines =[line.strip() for line in text.split('\n') if line.strip()]
     return '\n'.join(lines)
 
 
@@ -214,7 +218,7 @@ def extract_source_data(html_content, review_url):
 
     entry_content = soup.find('div', class_='entry-content')
     if not entry_content:
-        return {k: v for k, v in raw_data.items() if v is not None}
+        return raw_data 
 
     text_content = get_clean_text(str(entry_content))
 
@@ -265,7 +269,7 @@ def extract_source_data(html_content, review_url):
             elif "conspiracy" in alt or "pseudoscience" in alt: raw_data["Bias"] = "Conspiracy-Pseudoscience"
             elif "questionable" in alt: raw_data["Bias"] = "Questionable"
 
-    return raw_dati
+    return raw_data
 
 
 # --- MASTER APP ROUTING PROCESS ---
@@ -284,8 +288,6 @@ def main():
     master_links_lookup = {}  
     pending_tasks = {cat:[] for cat in CATEGORIES.values()}
     
-    # We will use a try-finally block to ensure that no matter what error or timeout happens, 
-    # save_db() and generate_statistics() ALWAYS run correctly.
     try:
         for url, cat_name in CATEGORIES.items():
             try:
@@ -321,8 +323,6 @@ def main():
                         pending_tasks[cat_name].append(link)
 
                 in_db_ct = len(unique_for_cat) - len(pending_tasks[cat_name])
-                
-                # Simplified and cleaned up Indents
                 print(f"• {cat_name}: {len(unique_for_cat)} found. {in_db_ct} DB. {len(pending_tasks[cat_name])} New.", flush=True)
 
             except Exception as e:
@@ -331,16 +331,14 @@ def main():
         total_pending = sum(len(urls) for urls in pending_tasks.values())
         execution_groups = {}
 
-        # --- ROUTING SYSTEM LOGIC SWITCH ---
         if total_pending > 0:
             print(f"\n[INFO] {total_pending} new links found. Starting extraction.", flush=True)
-            
-            # Start strictly with the category with the LEAST detected new entries (excluding zeroes)
             pending_filtered = {k: v for k, v in pending_tasks.items() if len(v) > 0}
             for cat, urllist in sorted(pending_filtered.items(), key=lambda i: len(i[1])):
                 execution_groups[cat] = urllist
         else:
-            BATCH_UPDATE_COUNT = 75
+            # PERFECT BATCH SIZE ESTABLISHED HERE
+            BATCH_UPDATE_COUNT = 300
             print(f"\n[INFO] Database is up to date. Reassessing the {BATCH_UPDATE_COUNT} oldest records.\n", flush=True)
             active_in_db =[u for u in scraped_dates_lookup.keys() if u in master_links_lookup]
             oldest_ranked = sorted(active_in_db, key=lambda u: scraped_dates_lookup[u])[:BATCH_UPDATE_COUNT]
@@ -356,18 +354,16 @@ def main():
             if not urls: continue
             cat_total = len(urls)
             
-            # Simplified Category Header
             print(f"\n--- Category: {cat_name} ({cat_total} entries) ---", flush=True)
 
             for idx, href in enumerate(urls, 1):
                 if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS):
-                     print(f"\n[!] Session timeout reached (4 hours). Saving progress and exiting...", flush=True)
+                     print(f"\n[!] Session ending organically. Saving progress...", flush=True)
                      break
                     
                 try:
-                    r = session.get(href, timeout=12)
+                    r = session.get(href, timeout=6)
                     if r.status_code == 200:
-                        
                         for check_cat in list(global_db.keys()):
                             global_db[check_cat] = [s for s in global_db[check_cat] if isinstance(s, dict) and s.get('Review') != href]
                         
@@ -376,14 +372,15 @@ def main():
 
                         p = [f"[{idx}/{cat_total}] [✓] {new_data_pkg.get('Name', 'Null Trace')[:65]}"]
                         
-                        if 'Bias' in new_data_pkg: p.append(f"B: {new_data_pkg['Bias']}")
-                        if 'Factuality' in new_data_pkg: p.append(f"F: {new_data_pkg['Factuality']}")
-                        if 'Credibility' in new_data_pkg: p.append(f"C: {new_data_pkg['Credibility']}")
-                        if 'Freedom' in new_data_pkg: p.append(f"FR: {new_data_pkg['Freedom']}")
-                        if 'Traffic' in new_data_pkg: p.append(f"T: {new_data_pkg['Traffic']}")
-                        if 'Type' in new_data_pkg: p.append(f"Type: {new_data_pkg['Type']}")
-                        if 'Country' in new_data_pkg: p.append(f"Country: {new_data_pkg['Country']}")
-                        if 'Reasoning' in new_data_pkg: p.append(f"Rsn: {new_data_pkg['Reasoning']}")
+                        if new_data_pkg.get('Bias'): p.append(f"B: {new_data_pkg['Bias']}")
+                        if new_data_pkg.get('Factuality'): p.append(f"F: {new_data_pkg['Factuality']}")
+                        if new_data_pkg.get('Credibility'): p.append(f"C: {new_data_pkg['Credibility']}")
+                        if new_data_pkg.get('Freedom'): p.append(f"FR: {new_data_pkg['Freedom']}")
+                        if new_data_pkg.get('Traffic'): p.append(f"T: {new_data_pkg['Traffic']}")
+                        if new_data_pkg.get('Type'): p.append(f"Type: {new_data_pkg['Type']}")
+                        if new_data_pkg.get('Country'): p.append(f"Country: {new_data_pkg['Country']}")
+                        if new_data_pkg.get('Reasoning'): p.append(f"Rsn: {new_data_pkg['Reasoning']}")
+                        
                         print(" | ".join(p), flush=True)
 
                     elif r.status_code == 404:
@@ -407,7 +404,6 @@ def main():
         print(f"\n[!] Unexpected error during execution: {e}", flush=True)
         traceback.print_exc()
     finally:
-        # Ensures that even if the code crashes or times out, Data and Stats will be written perfectly.
         print("\n[OK] Processing complete. Saving database and generating statistics.", flush=True)
         pending_counts_for_stats = {cat: len(tasks) for cat, tasks in pending_tasks.items()}
         save_db(global_db)
