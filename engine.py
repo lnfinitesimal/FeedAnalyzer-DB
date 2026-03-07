@@ -1,3 +1,4 @@
+import random
 import requests
 from requests.adapters import HTTPAdapter, Retry
 from bs4 import BeautifulSoup
@@ -338,7 +339,7 @@ def main():
                 execution_groups[cat] = urllist
         else:
             # PERFECT BATCH SIZE ESTABLISHED HERE
-            BATCH_UPDATE_COUNT = 300
+            BATCH_UPDATE_COUNT = 400
             print(f"\n[INFO] Database is up to date. Reassessing the {BATCH_UPDATE_COUNT} oldest records.\n", flush=True)
             active_in_db =[u for u in scraped_dates_lookup.keys() if u in master_links_lookup]
             oldest_ranked = sorted(active_in_db, key=lambda u: scraped_dates_lookup[u])[:BATCH_UPDATE_COUNT]
@@ -393,7 +394,8 @@ def main():
                 except Exception as e:
                     print(f"[{idx}/{cat_total}] [X] Network Error: {e}", flush=True)
 
-                time.sleep(1.6)
+                # Sleeps for a random time between 1.3 and 2.4 seconds to mimic human browsing
+                time.sleep(random.uniform(1.3, 2.4))
 
             if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS): 
                  break
