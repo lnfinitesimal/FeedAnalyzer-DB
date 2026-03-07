@@ -392,15 +392,19 @@ def main():
                     urls_processed_this_run += 1
                     if urls_processed_this_run % 15 == 0:
                          save_db(global_db)
+                         # FIX 1: Generate stats concurrent with DB save
+                         pending_counts_for_stats = {cat: len(tasks) for cat, tasks in pending_tasks.items()}
+                         generate_statistics(global_db, pending_counts_for_stats)
 
                 except Exception as e:
                     print(f"[{idx}/{cat_total}] [X] Network Error: {e}", flush=True)
 
+                # FIX 2: Moved up to check for shutdown BEFORE sleeping to beat GitHub's Kill Timer
+                if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS): 
+                     break
+
                 # HUMAN JITTER: Randomized sleep interval to look completely human to Cloudflare
                 time.sleep(random.uniform(1.3, 2.4))
-
-            if SHUTDOWN_REQUESTED or (time.time() - START_TIME > MAX_RUNTIME_SECONDS): 
-                 break
 
     except KeyboardInterrupt:
         print("\n[!] Process interrupted by user.", flush=True)
