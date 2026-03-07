@@ -223,16 +223,24 @@ def clean_bias(t):
     t = clean_string(t)
     if not t:
         return None
-    t = re.sub(r'\([0-9.-]+\)', '', t)
+    t = re.sub(r'\([^)]*\d[^)]*\)', '', t)  # Handles typos like (6.o) (-6.O) etc.
     t = re.sub(r'\bBIAS\b', '', t, flags=re.IGNORECASE)
     t = re.sub(r'-\s+', '-', t)
-    return t.strip().title()
+    t = t.strip().title()
+    # Normalize "Right-Conspiracy-Pseudoscience" → "Right Conspiracy-Pseudoscience"
+    # Preserves "Left-Center" and "Right-Center"
+    for direction in ['Extreme Left', 'Extreme Right', 'Left', 'Right']:
+        prefix = direction + '-'
+        if t.startswith(prefix) and not t.startswith(direction + '-Center'):
+            t = direction + ' ' + t[len(prefix):]
+            break
+    return t
 
 def clean_factuality(t):
     t = clean_string(t)
     if not t:
         return None
-    return re.sub(r'\([0-9.-]+\)', '', t).strip().title()
+    return re.sub(r'\([^)]*\d[^)]*\)', '', t).strip().title()  # Handles typos like (6.o)
 
 def clean_metric_standard(t):
     t = clean_string(t)
