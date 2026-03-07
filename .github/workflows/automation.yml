@@ -2,7 +2,7 @@ name: DB Intel Automation
 
 on:
   schedule:
-    # Run safely 4 times a day perfectly under the cloudflare radar
+    # Executes precisely on 6-hour bounds ensuring optimal anti-IP block continuity limits natively handled naturally 
     - cron: '0 0,6,12,18 * * *'
   workflow_dispatch:
 
@@ -16,7 +16,6 @@ permissions:
 jobs:
   compile-intel:
     runs-on: ubuntu-latest
-    # Bumps the physical container time out 30 minutes beyond the Python script limits ensuring saves actually pass
     timeout-minutes: 270 
     steps:
       - name: Checkout Code
@@ -40,10 +39,10 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add ratings.json statistics.md
           if git diff --staged --quiet; then
-            echo "No changes detected. Concluding run smoothly."
+            echo "No changes detected. Workflow concluded seamlessly."
             exit 0
           else
-            git commit -m "Auto-update: DB Integrations"
+            git commit -m "System DB Autoupdate Complete"
             git pull --rebase origin main
             git push
           fi
